@@ -3,10 +3,30 @@ import threading
 import re
 import os
 import json
+from urllib.parse import urlparse
 
 
-DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0"
-DEFAULT_REFERER = "https://www.google.com/"
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0"
+
+BROWSER_HEADERS = {
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Sec-Fetch-Mode": "navigate",
+}
+
+
+def _referer_for_url(url):
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.hostname:
+        return f"{parsed.scheme}://{parsed.hostname}/"
+    return "https://www.google.com/"
+
+
+def _origin_for_url(url):
+    parsed = urlparse(url)
+    if parsed.scheme and parsed.hostname:
+        return f"{parsed.scheme}://{parsed.hostname}"
+    return None
 
 
 class Downloader:
@@ -15,21 +35,18 @@ class Downloader:
         self.process = None
         self.cancelled = False
 
-    def build_command(self, url, format_str="bv*+ba/b", cookies_browser="firefox",
-                      use_hls_fallback=False, extra_args=None):
-        cmd = ["yt-dlp"]
-
-        if use_hls_fallback:
-            cmd += ["-f", "best[protocol=m3u8]/best"]
-        else:
-            cmd += ["-f", format_str]
-
+    def _base_args(self, url, cookies_browser):
+        # stuff that goes into every command
+        cmd = []
         if cookies_browser:
             cmd += ["--cookies-from-browser", cookies_browser]
 
+        referer = _referer_for_url(url)
+        origin = _origin_for_url(url)
+
         cmd += [
             "--user-agent", DEFAULT_USER_AGENT,
-            "--referer", DEFAULT_REFERER,
+            "--referer", referer,
             "--geo-bypass",
             "--no-check-certificate",
             "--merge-output-format", "mp4",
@@ -37,95 +54,129 @@ class Downloader:
             "-o", os.path.join(self.output_dir, "%(title)s.%(ext)s"),
         ]
 
-        if extra_args:
-            cmd += extra_args
+        for k, v in BROWSER_HEADERS.items():
+            cmd += ["--add-header", f"{k}:{v}"]
 
-        cmd.append(url)
+        if origin:
+            cmd += ["--add-header", f"Origin:{origin}"]
+
         return cmd
 
-    def get_video_info(self, url, cookies_browser="firefox"):
-        cmd = [
-            "yt-dlp", "--dump-json", "--no-download",
-            "--no-check-certificate", "--geo-bypass",
-        ]
-        if cookies_browser:
-            cmd += ["--cookies-from-browser", cookies_browser]
+    def _build_strategies(self, url, format_str, cookies_browser):
+        # each strategy is (label, cmd list)
+        strategies = []
+
+        # 1: normal
+        cmd = ["yt-dlp", "-f", format_str]
+        cmd += self._base_args(url, cookies_browser)
+        cmd.append(url)
+        strategies.append(("default", cmd))
+
+        # 2: hls fallback + legacy server connect
+        cmd = ["yt-dlp", "-f", "best[protocol=m3u8]/best"]
+        cmd += self._base_args(url, cookies_browser)
+        cmd += ["--legacy-server-connect"]
+        cmd.append(url)
+        strategies.append(("hls + legacy-server-connect", cmd))
+
+        # 3: ffmpeg external downloader + legacy
+        cmd = ["yt-dlp", "-f", format_str]
+        cmd += self._base_args(url, cookies_browser)
         cmd += [
-            "--user-agent", DEFAULT_USER_AGENT,
-            "--referer", DEFAULT_REFERER,
-            url,
+            "--legacy-server-connect",
+            "--downloader", "ffmpeg",
+            "--downloader-args", "ffmpeg:-headers 'User-Agent: " + DEFAULT_USER_AGENT + "'",
         ]
+        cmd.append(url)
+        strategies.append(("ffmpeg downloader", cmd))
+
+        # 4: nuclear - hls + ffmpeg + sleep between requests
+        cmd = ["yt-dlp", "-f", "best[protocol=m3u8]/best"]
+        cmd += self._base_args(url, cookies_browser)
+        cmd += [
+            "--legacy-server-connect",
+            "--downloader", "ffmpeg",
+            "--sleep-requests", "1",
+            "--extractor-retries", "3",
+        ]
+        cmd.append(url)
+        strategies.append(("hls + ffmpeg + throttle", cmd))
+
+        return strategies
+
+    def get_video_info(self, url, cookies_browser="firefox"):
+        cmd = ["yt-dlp", "--dump-json", "--no-download"]
+        cmd += self._base_args(url, cookies_browser)
+        cmd += ["--legacy-server-connect"]
+        cmd.append(url)
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
             if result.returncode == 0:
                 return json.loads(result.stdout)
         except Exception:
             pass
         return None
 
+    def _run_attempt(self, cmd, on_progress):
+        # runs one strategy, returns (success, had_http_error)
+        self.process = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1
+        )
+
+        had_http_error = False
+
+        for line in self.process.stdout:
+            if self.cancelled:
+                self.process.kill()
+                return (False, False)
+
+            line = line.strip()
+            if on_progress:
+                on_progress(line)
+
+            if "HTTP Error 404" in line or "HTTP Error 412" in line:
+                had_http_error = True
+
+        self.process.wait()
+        ok = self.process.returncode == 0
+        return (ok, had_http_error)
+
     def download(self, url, on_progress=None, on_finished=None, on_error=None,
                  cookies_browser="firefox", format_str="bv*+ba/b"):
         self.cancelled = False
 
         def _run():
-            cmd = self.build_command(url, format_str=format_str, cookies_browser=cookies_browser)
             try:
-                self.process = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1
-                )
+                strategies = self._build_strategies(url, format_str, cookies_browser)
 
-                got_404 = False
-                output_lines = []
-
-                for line in self.process.stdout:
+                for i, (label, cmd) in enumerate(strategies):
                     if self.cancelled:
-                        self.process.kill()
                         return
 
-                    line = line.strip()
-                    output_lines.append(line)
+                    if i > 0 and on_progress:
+                        on_progress(f"[retry {i}/{len(strategies)-1}] trying: {label}...")
 
-                    if on_progress:
-                        on_progress(line)
+                    ok, had_http_error = self._run_attempt(cmd, on_progress)
 
-                    if "HTTP Error 404" in line or "HTTP Error 412" in line:
-                        got_404 = True
+                    if ok:
+                        if on_finished and not self.cancelled:
+                            on_finished()
+                        return
 
-                self.process.wait()
+                    if self.cancelled:
+                        return
 
-                # 404/412 retry with hls
-                if got_404 and not self.cancelled:
-                    if on_progress:
-                        on_progress("[retry] switching to hls format...")
+                    # no http error means something else went wrong, still try next
+                    if not had_http_error and i == 0:
+                        # first attempt failed with non-http error, might not be worth retrying
+                        # but try once more with legacy connect anyway
+                        continue
 
-                    cmd = self.build_command(url, cookies_browser=cookies_browser, use_hls_fallback=True)
-                    self.process = subprocess.Popen(
-                        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                        text=True, bufsize=1
-                    )
-
-                    for line in self.process.stdout:
-                        if self.cancelled:
-                            self.process.kill()
-                            return
-                        line = line.strip()
-                        if on_progress:
-                            on_progress(line)
-
-                    self.process.wait()
-
-                    if self.process.returncode != 0 and on_error:
-                        on_error("download failed even with hls fallback")
-                    elif on_finished and not self.cancelled:
-                        on_finished()
-                elif self.process.returncode != 0 and not self.cancelled:
-                    if on_error:
-                        on_error("download failed (exit code {})".format(self.process.returncode))
-                elif not self.cancelled:
-                    if on_finished:
-                        on_finished()
+                # all strategies exhausted
+                if not self.cancelled and on_error:
+                    on_error("all download strategies failed")
 
             except FileNotFoundError:
                 if on_error:
@@ -148,7 +199,6 @@ class Downloader:
 
     @staticmethod
     def parse_progress(line):
-        # tries to pull percentage from yt-dlp output
         match = re.search(r'(\d+\.?\d*)%', line)
         if match:
             return float(match.group(1))
