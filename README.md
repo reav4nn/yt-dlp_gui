@@ -1,30 +1,49 @@
 # yt-dlp gui
 
-a simple gui wrapper around yt-dlp that handles common download issues like 404 errors, region blocks, and bot detection. it auto-retries with hls fallback when direct links fail.
+a simple gui wrapper around yt-dlp that handles common download issues like 404 errors, region blocks, and bot detection. auto-retries with multiple fallback strategies when direct links fail.
 
 ## what it does
 
 - uses browser cookies to bypass bot detection
-- spoofs user-agent and referer headers
+- spoofs user-agent, referer, origin and browser headers
 - geo-bypass and ssl bypass built in
-- auto fallback to hls (m3u8) format on 404/412 errors
+- 4-stage retry chain: default, hls, ffmpeg downloader, hls+ffmpeg+throttle
 - merges video+audio into mp4
 
-## install
+## dependencies
 
-you need python 3.8+ and yt-dlp installed on your system.
+you need these installed on your system:
+
+- python 3.8+
+- yt-dlp
+- ffmpeg (used as fallback downloader)
+- tkinter (python-tk)
+
+on arch/manjaro:
+
+```
+sudo pacman -S python yt-dlp ffmpeg tk
+```
+
+on ubuntu/debian:
+
+```
+sudo apt install python3 python3-tk ffmpeg
+pip install yt-dlp
+```
+
+on fedora:
+
+```
+sudo dnf install python3 python3-tkinter ffmpeg
+pip install yt-dlp
+```
+
+then install the python deps:
 
 ```
 pip install -r requirements.txt
 ```
-
-make sure yt-dlp is also available:
-
-```
-pip install yt-dlp
-```
-
-or install it through your package manager.
 
 ## run
 
@@ -39,7 +58,7 @@ python main.py
 3. choose output folder if you want something other than ~/Downloads
 4. hit download
 
-if the download gets a 404 or 412 error, it automatically retries using hls streaming format.
+if the download fails with 404 or 412, it automatically cycles through fallback strategies (hls format, ffmpeg downloader, throttled requests) until one works.
 
 ## notes
 
@@ -47,8 +66,4 @@ if the download gets a 404 or 412 error, it automatically retries using hls stre
 - the format field defaults to "bv*+ba/b" which grabs best video + best audio
 - you can change it to whatever yt-dlp format string you want
 - logs show the raw yt-dlp output at the bottom
-
-## dependencies
-
-- yt-dlp
-- customtkinter
+- referer and origin are set to match the target site automatically
