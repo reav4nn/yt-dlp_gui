@@ -211,7 +211,8 @@ class Downloader:
 
             if "HTTP Error 404" in line or "HTTP Error 412" in line:
                 had_http_error = True
-            if "could not copy" in line.lower() and "cookie" in line.lower():
+            ll = line.lower()
+            if ("could not copy" in ll and "cookie" in ll) or "failed to decrypt" in ll:
                 had_cookie_error = True
 
         self.process.wait()
