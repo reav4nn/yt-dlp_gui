@@ -12,12 +12,12 @@ a simple gui wrapper around yt-dlp that handles common download issues like 404 
 
 ## dependencies
 
-you need these installed on your system:
-
 - python 3.8+
 - yt-dlp
 - ffmpeg (used as fallback downloader)
-- tkinter (python-tk)
+- tkinter (python-tk on linux)
+
+### linux
 
 on arch/manjaro:
 
@@ -44,6 +44,45 @@ then install the python deps:
 ```
 pip install -r requirements.txt
 ```
+
+### windows
+
+1. install python from https://python.org (check "add to PATH" during install)
+
+2. get yt-dlp.exe from https://github.com/yt-dlp/yt-dlp/releases/latest
+   - download `yt-dlp.exe`
+   - either drop it in the same folder as this app, or put it somewhere and add that folder to PATH
+
+3. get ffmpeg from https://www.gyan.dev/ffmpeg/builds/
+   - download the "essentials" build
+   - extract it somewhere like `C:\ffmpeg`
+   - add `C:\ffmpeg\bin` to your system PATH
+
+4. to add something to PATH:
+   - open settings > system > about > advanced system settings
+   - click "environment variables"
+   - under system variables, find "Path", click edit
+   - click "new" and add the folder that has yt-dlp.exe (or ffmpeg.exe)
+   - click ok and restart your terminal/app
+
+5. install python deps:
+
+```
+pip install -r requirements.txt
+```
+
+the app also checks common locations automatically:
+- same folder as the script
+- `%LOCALAPPDATA%\yt-dlp\`
+- `%USERPROFILE%\Downloads\`
+- `C:\yt-dlp\`
+- `C:\ffmpeg\bin\`
+
+so if you just put yt-dlp.exe next to main.py, it should work without touching PATH.
+
+important: make sure the file is actually named `yt-dlp.exe`, not `yt-dlp (1).exe` or anything like that.
+
+if you installed yt-dlp via pip (`pip install yt-dlp`) instead of using the standalone exe, that works too. pip puts it in your python scripts folder which is usually already in PATH.
 
 ## run
 

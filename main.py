@@ -3,9 +3,10 @@ import tkinter as tk
 from tkinter import filedialog
 import threading
 import os
-import re
+import sys
+import shutil
 
-from downloader import Downloader
+from downloader import Downloader, find_ytdlp, find_ffmpeg, IS_WIN
 
 
 ctk.set_appearance_mode("dark")
@@ -24,6 +25,7 @@ class App(ctk.CTk):
         self.downloading = False
 
         self._build_ui()
+        self._check_deps()
 
     def _build_ui(self):
         self.grid_columnconfigure(0, weight=1)
@@ -96,6 +98,36 @@ class App(ctk.CTk):
         # status bar
         self.status_label = ctk.CTkLabel(self, text="ready", font=("", 11), anchor="w")
         self.status_label.grid(row=4, column=0, padx=16, pady=(0, 10), sticky="ew")
+
+    def _check_deps(self):
+        yt = self.downloader.ytdlp_path
+        ff = self.downloader.ffmpeg_path
+
+        yt_ok = shutil.which(yt) is not None or os.path.isfile(yt)
+        ff_ok = shutil.which(ff) is not None or os.path.isfile(ff)
+
+        msgs = []
+        if not yt_ok:
+            msgs.append("yt-dlp not found")
+        if not ff_ok:
+            msgs.append("ffmpeg not found")
+
+        if msgs:
+            warn = ", ".join(msgs)
+            if IS_WIN:
+                warn += " -- add to PATH or put .exe next to this script"
+            self._set_status(warn)
+            self._log(f"[warn] {warn}")
+            if not yt_ok:
+                self._log("[warn] download yt-dlp.exe from https://github.com/yt-dlp/yt-dlp/releases")
+                if IS_WIN:
+                    self._log("[warn] put it in the same folder as this app, or add its folder to system PATH")
+            if not ff_ok:
+                self._log("[warn] download ffmpeg from https://www.gyan.dev/ffmpeg/builds/")
+                if IS_WIN:
+                    self._log("[warn] extract and add the bin/ folder to system PATH")
+        else:
+            self._set_status(f"ready | yt-dlp: {yt}")
 
     def _pick_dir(self):
         d = filedialog.askdirectory(initialdir=self.dir_var.get())
@@ -171,6 +203,12 @@ class App(ctk.CTk):
         self.cancel_button.configure(state="disabled")
         self._set_status(f"error: {err}")
         self._log(f"[error] {err}")
+        if "not found" in err.lower() and IS_WIN:
+            self._log("[error] yt-dlp.exe is not in your PATH.")
+            self._log("[error] either put yt-dlp.exe next to this script,")
+            self._log("[error] or add its folder to system PATH:")
+            self._log("[error]   settings > system > about > advanced system settings")
+            self._log("[error]   > environment variables > Path > edit > add folder")
 
     def _cancel_download(self):
         self.downloader.cancel()

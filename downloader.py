@@ -2,7 +2,9 @@ import subprocess
 import threading
 import re
 import os
+import sys
 import json
+import shutil
 from urllib.parse import urlparse
 
 
@@ -13,6 +15,66 @@ BROWSER_HEADERS = {
     "Accept-Language": "en-US,en;q=0.5",
     "Sec-Fetch-Mode": "navigate",
 }
+
+IS_WIN = sys.platform == "win32"
+
+
+def find_ytdlp():
+    # check PATH first
+    found = shutil.which("yt-dlp")
+    if found:
+        return found
+
+    if not IS_WIN:
+        return "yt-dlp"
+
+    # common windows locations
+    spots = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "yt-dlp.exe"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "yt-dlp", "yt-dlp.exe"),
+        os.path.join(os.environ.get("USERPROFILE", ""), "yt-dlp", "yt-dlp.exe"),
+        os.path.join(os.environ.get("USERPROFILE", ""), "Downloads", "yt-dlp.exe"),
+        os.path.join(os.environ.get("PROGRAMFILES", ""), "yt-dlp", "yt-dlp.exe"),
+        "C:\\yt-dlp\\yt-dlp.exe",
+    ]
+    for p in spots:
+        if p and os.path.isfile(p):
+            return p
+
+    return "yt-dlp"
+
+
+def find_ffmpeg():
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+
+    if not IS_WIN:
+        return "ffmpeg"
+
+    spots = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg.exe"),
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "ffmpeg", "bin", "ffmpeg.exe"),
+        os.path.join(os.environ.get("USERPROFILE", ""), "ffmpeg", "bin", "ffmpeg.exe"),
+        os.path.join(os.environ.get("PROGRAMFILES", ""), "ffmpeg", "bin", "ffmpeg.exe"),
+        "C:\\ffmpeg\\bin\\ffmpeg.exe",
+    ]
+    for p in spots:
+        if p and os.path.isfile(p):
+            return p
+
+    return "ffmpeg"
+
+
+def _popen_kwargs():
+    # hide console window on windows
+    kw = {}
+    if IS_WIN:
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        si.wShowWindow = 0
+        kw["startupinfo"] = si
+    return kw
 
 
 def _referer_for_url(url):
@@ -34,6 +96,8 @@ class Downloader:
         self.output_dir = output_dir or os.path.join(os.path.expanduser("~"), "Downloads")
         self.process = None
         self.cancelled = False
+        self.ytdlp_path = find_ytdlp()
+        self.ffmpeg_path = find_ffmpeg()
 
     def _base_args(self, url, cookies_browser):
         # stuff that goes into every command
@@ -63,55 +127,64 @@ class Downloader:
         return cmd
 
     def _build_strategies(self, url, format_str, cookies_browser):
-        # each strategy is (label, cmd list)
+        yt = self.ytdlp_path
+        ff = self.ffmpeg_path
         strategies = []
 
         # 1: normal
-        cmd = ["yt-dlp", "-f", format_str]
+        cmd = [yt, "-f", format_str]
         cmd += self._base_args(url, cookies_browser)
+        if ff != "ffmpeg":
+            cmd += ["--ffmpeg-location", ff]
         cmd.append(url)
         strategies.append(("default", cmd))
 
         # 2: hls fallback + legacy server connect
-        cmd = ["yt-dlp", "-f", "best[protocol=m3u8]/best"]
+        cmd = [yt, "-f", "best[protocol=m3u8]/best"]
         cmd += self._base_args(url, cookies_browser)
         cmd += ["--legacy-server-connect"]
+        if ff != "ffmpeg":
+            cmd += ["--ffmpeg-location", ff]
         cmd.append(url)
         strategies.append(("hls + legacy-server-connect", cmd))
 
         # 3: ffmpeg external downloader + legacy
-        cmd = ["yt-dlp", "-f", format_str]
+        cmd = [yt, "-f", format_str]
         cmd += self._base_args(url, cookies_browser)
         cmd += [
             "--legacy-server-connect",
-            "--downloader", "ffmpeg",
+            "--downloader", ff,
             "--downloader-args", "ffmpeg:-headers 'User-Agent: " + DEFAULT_USER_AGENT + "'",
         ]
+        if ff != "ffmpeg":
+            cmd += ["--ffmpeg-location", ff]
         cmd.append(url)
         strategies.append(("ffmpeg downloader", cmd))
 
         # 4: nuclear - hls + ffmpeg + sleep between requests
-        cmd = ["yt-dlp", "-f", "best[protocol=m3u8]/best"]
+        cmd = [yt, "-f", "best[protocol=m3u8]/best"]
         cmd += self._base_args(url, cookies_browser)
         cmd += [
             "--legacy-server-connect",
-            "--downloader", "ffmpeg",
+            "--downloader", ff,
             "--sleep-requests", "1",
             "--extractor-retries", "3",
         ]
+        if ff != "ffmpeg":
+            cmd += ["--ffmpeg-location", ff]
         cmd.append(url)
         strategies.append(("hls + ffmpeg + throttle", cmd))
 
         return strategies
 
     def get_video_info(self, url, cookies_browser="firefox"):
-        cmd = ["yt-dlp", "--dump-json", "--no-download"]
+        cmd = [self.ytdlp_path, "--dump-json", "--no-download"]
         cmd += self._base_args(url, cookies_browser)
         cmd += ["--legacy-server-connect"]
         cmd.append(url)
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=45, **_popen_kwargs())
             if result.returncode == 0:
                 return json.loads(result.stdout)
         except Exception:
@@ -119,10 +192,9 @@ class Downloader:
         return None
 
     def _run_attempt(self, cmd, on_progress):
-        # runs one strategy, returns (success, had_http_error)
         self.process = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1
+            text=True, bufsize=1, **_popen_kwargs()
         )
 
         had_http_error = False
