@@ -198,11 +198,12 @@ class Downloader:
         )
 
         had_http_error = False
+        had_cookie_error = False
 
         for line in self.process.stdout:
             if self.cancelled:
                 self.process.kill()
-                return (False, False)
+                return (False, False, False)
 
             line = line.strip()
             if on_progress:
@@ -210,10 +211,12 @@ class Downloader:
 
             if "HTTP Error 404" in line or "HTTP Error 412" in line:
                 had_http_error = True
+            if "could not copy" in line.lower() and "cookie" in line.lower():
+                had_cookie_error = True
 
         self.process.wait()
         ok = self.process.returncode == 0
-        return (ok, had_http_error)
+        return (ok, had_http_error, had_cookie_error)
 
     def download(self, url, on_progress=None, on_finished=None, on_error=None,
                  cookies_browser="firefox", format_str="bv*+ba/b"):
@@ -230,7 +233,7 @@ class Downloader:
                     if i > 0 and on_progress:
                         on_progress(f"[retry {i}/{len(strategies)-1}] trying: {label}...")
 
-                    ok, had_http_error = self._run_attempt(cmd, on_progress)
+                    ok, had_http_error, had_cookie_error = self._run_attempt(cmd, on_progress)
 
                     if ok:
                         if on_finished and not self.cancelled:
@@ -240,13 +243,33 @@ class Downloader:
                     if self.cancelled:
                         return
 
-                    # no http error means something else went wrong, still try next
+                    if had_cookie_error:
+                        # browser is locking the cookie db, retrying with same browser is pointless
+                        if on_progress:
+                            on_progress("[warn] browser is locking cookies, retrying without cookies...")
+                            on_progress("[warn] close the browser for cookie access, or this will try without them")
+
+                        # rebuild strategies without cookies and run them
+                        no_cookie_strategies = self._build_strategies(url, format_str, None)
+                        for j, (nc_label, nc_cmd) in enumerate(no_cookie_strategies):
+                            if self.cancelled:
+                                return
+                            if j > 0 and on_progress:
+                                on_progress(f"[retry {j}/{len(no_cookie_strategies)-1}] (no cookies) {nc_label}...")
+
+                            nc_ok, _, _ = self._run_attempt(nc_cmd, on_progress)
+                            if nc_ok:
+                                if on_finished and not self.cancelled:
+                                    on_finished()
+                                return
+
+                        if not self.cancelled and on_error:
+                            on_error("failed. close the browser and try again for cookie access")
+                        return
+
                     if not had_http_error and i == 0:
-                        # first attempt failed with non-http error, might not be worth retrying
-                        # but try once more with legacy connect anyway
                         continue
 
-                # all strategies exhausted
                 if not self.cancelled and on_error:
                     on_error("all download strategies failed")
 
