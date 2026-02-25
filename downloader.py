@@ -189,10 +189,20 @@ class Downloader:
 
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=45, **_popen_kwargs())
+            
             if result.returncode == 0:
                 return json.loads(result.stdout)
-        except Exception:
-            pass
+            else:
+                print(f"[ERROR] get_video_info failed. Exit Code: {result.returncode}", file=sys.stderr)
+                print(f"[ERROR DETAILS]: {result.stderr}", file=sys.stderr)
+                
+        except subprocess.TimeoutExpired:
+            print("[ERROR] get_video_info encountered a 45-second timeout.", file=sys.stderr)
+        except json.JSONDecodeError:
+            print("[ERROR] the output of get_video_info is not in a valid JSON format.", file=sys.stderr)
+        except Exception as e:
+            print(f"[ERROR] an unexpected error occurred during get_video_info: {str(e)}", file=sys.stderr)
+            
         return None
 
     def _run_attempt(self, cmd, on_progress):
