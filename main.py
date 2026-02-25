@@ -5,6 +5,7 @@ import threading
 import os
 import sys
 import shutil
+import re
 
 from downloader import Downloader, find_ytdlp, find_ffmpeg, IS_WIN
 
@@ -17,12 +18,13 @@ class App(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("yt-dlp gui")
+        self.title("YT-DLP GUI")
         self.geometry("780x560")
         self.minsize(650, 480)
 
         self.downloader = Downloader()
         self.downloading = False
+        self.deps_ok = False
 
         self._build_ui()
         self._check_deps()
@@ -66,7 +68,8 @@ class App(ctk.CTk):
         self.dir_var = ctk.StringVar(value=self.downloader.output_dir)
         self.dir_entry = ctk.CTkEntry(settings_frame, textvariable=self.dir_var, width=180)
         self.dir_entry.pack(side="left", padx=(0, 4))
-        ctk.CTkButton(settings_frame, text="...", width=32, command=self._pick_dir).pack(side="left")
+        self.dir_btn = ctk.CTkButton(settings_frame, text="...", width=32, command=self._pick_dir)
+        self.dir_btn.pack(side="left")
 
         # buttons
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
@@ -113,6 +116,8 @@ class App(ctk.CTk):
             msgs.append("ffmpeg not found")
 
         if msgs:
+            self.deps_ok = False
+            self.dl_button.configure(state="disabled") # disable download button if dependencies are missing
             warn = ", ".join(msgs)
             if IS_WIN:
                 warn += " -- add to PATH or put .exe next to this script"
@@ -127,6 +132,8 @@ class App(ctk.CTk):
                 if IS_WIN:
                     self._log("[warn] extract and add the bin/ folder to system PATH")
         else:
+            self.deps_ok = True
+            self.dl_button.configure(state="normal") # enable download button if dependencies are found
             self._set_status(f"ready | yt-dlp: {yt}")
 
     def _pick_dir(self):
@@ -143,10 +150,26 @@ class App(ctk.CTk):
     def _set_status(self, text):
         self.status_label.configure(text=text)
 
+    def _toggle_inputs(self, state):
+        # state can be "normal" or "disabled"
+        self.url_entry.configure(state=state)
+        self.browser_menu.configure(state=state)
+        self.format_entry.configure(state=state)
+        self.dir_entry.configure(state=state)
+        self.dir_btn.configure(state=state)
+
     def _start_download(self):
+        if getattr(self, "deps_ok", False) is False:
+            return
+
         url = self.url_entry.get().strip()
         if not url:
             self._set_status("enter a url first")
+            return
+            
+        # basic url validation
+        if not re.match(r"^https?://[^\s]+", url):
+            self._set_status("enter a valid http/https url")
             return
 
         if self.downloading:
@@ -155,6 +178,8 @@ class App(ctk.CTk):
         self.downloading = True
         self.dl_button.configure(state="disabled")
         self.cancel_button.configure(state="normal")
+        self._toggle_inputs("disabled")  # disable inputs during download
+
         self.progress_bar.set(0)
         self.pct_label.configure(text="0%")
 
@@ -192,6 +217,7 @@ class App(ctk.CTk):
         self.downloading = False
         self.dl_button.configure(state="normal")
         self.cancel_button.configure(state="disabled")
+        self._toggle_inputs("normal")
         self.progress_bar.set(1.0)
         self.pct_label.configure(text="100%")
         self._set_status("done")
@@ -201,6 +227,7 @@ class App(ctk.CTk):
         self.downloading = False
         self.dl_button.configure(state="normal")
         self.cancel_button.configure(state="disabled")
+        self._toggle_inputs("normal")
         self._set_status(f"error: {err}")
         self._log(f"[error] {err}")
         if "not found" in err.lower() and IS_WIN:
@@ -215,6 +242,7 @@ class App(ctk.CTk):
         self.downloading = False
         self.dl_button.configure(state="normal")
         self.cancel_button.configure(state="disabled")
+        self._toggle_inputs("normal")
         self._set_status("cancelled")
         self._log("-- cancelled --")
 
