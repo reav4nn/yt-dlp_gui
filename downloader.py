@@ -5,6 +5,7 @@ import os
 import sys
 import json
 import shutil
+import signal
 from urllib.parse import urlparse
 
 
@@ -67,13 +68,16 @@ def find_ffmpeg():
 
 
 def _popen_kwargs():
-    # hide console window on windows
+    # hide console window on windows and setup process groups
     kw = {}
     if IS_WIN:
         si = subprocess.STARTUPINFO()
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         si.wShowWindow = 0
         kw["startupinfo"] = si
+        kw["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kw["preexec_fn"] = os.setsid
     return kw
 
 
@@ -289,7 +293,15 @@ class Downloader:
         self.cancelled = True
         if self.process:
             try:
-                self.process.kill()
+                if IS_WIN:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(self.process.pid)],
+                        stdout=subprocess.DEVNULL, 
+                        stderr=subprocess.DEVNULL,
+                        creationflags=subprocess.CREATE_NO_WINDOW
+                    )
+                else:
+                    os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
             except Exception:
                 pass
 
