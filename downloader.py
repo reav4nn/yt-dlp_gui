@@ -158,7 +158,7 @@ class Downloader:
         cmd += [
             "--legacy-server-connect",
             "--downloader", ff,
-            "--downloader-args", "ffmpeg:-headers 'User-Agent: " + DEFAULT_USER_AGENT + "'",
+            "--downloader-args", f"ffmpeg:-headers \"User-Agent: {DEFAULT_USER_AGENT}\"",
         ]
         if ff != "ffmpeg":
             cmd += ["--ffmpeg-location", ff]
