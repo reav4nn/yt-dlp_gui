@@ -5,12 +5,29 @@ __pycache__/
 *.log
 *.pyc
 *.pyo
-.venv/
-venv/
-env/
 .env
 dist/
 build/
 *.egg-info/
 *.spec
+venv/
+.venv/
+env/
+.env
+
+# Build artifacts
+dist/
+build/
+*.spec
+*.egg-info/
+
+# Downloaded binaries (do NOT commit these)
+yt-dlp
+yt-dlp.exe
+ffmpeg
+ffmpeg.exe
+ffprobe
+ffprobe.exe
+
+# Other folders
 downloads/

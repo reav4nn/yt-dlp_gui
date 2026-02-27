@@ -21,17 +21,33 @@ IS_WIN = sys.platform == "win32"
 
 
 def find_ytdlp():
-    # check PATH first
-    found = shutil.which("yt-dlp")
+    """Locate the yt-dlp binary.
+
+    Priority order:
+    1. bundled binary inside frozen app base path
+    2. PATH (shutil.which)
+    3. common platform-specific locations
+    Falls back to the binary name so subprocess can use PATH resolution.
+    """
+    binary = "yt-dlp.exe" if IS_WIN else "yt-dlp"
+
+    # 1) check bundled base path first (for PyInstaller onefile)
+    base = get_base_path()
+    bundled = os.path.join(base, binary)
+    if os.path.isfile(bundled):
+        return bundled
+
+    # 2) check PATH
+    found = shutil.which(binary)
     if found:
         return found
 
+    # 3) common platform-specific locations
     if not IS_WIN:
-        return "yt-dlp"
+        return binary
 
-    # common windows locations
     spots = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "yt-dlp.exe"),
+        os.path.join(base, "yt-dlp.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "yt-dlp", "yt-dlp.exe"),
         os.path.join(os.environ.get("USERPROFILE", ""), "yt-dlp", "yt-dlp.exe"),
         os.path.join(os.environ.get("USERPROFILE", ""), "Downloads", "yt-dlp.exe"),
@@ -42,19 +58,32 @@ def find_ytdlp():
         if p and os.path.isfile(p):
             return p
 
-    return "yt-dlp"
+    return binary
 
 
 def find_ffmpeg():
-    found = shutil.which("ffmpeg")
+    """Locate ffmpeg binary with the same priority as yt-dlp.
+
+    Returns the path to ffmpeg/ffmpeg.exe or the binary name fallback.
+    """
+    binary = "ffmpeg.exe" if IS_WIN else "ffmpeg"
+
+    # 1) check bundled base path first
+    base = get_base_path()
+    bundled = os.path.join(base, binary)
+    if os.path.isfile(bundled):
+        return bundled
+
+    # 2) check PATH
+    found = shutil.which(binary)
     if found:
         return found
 
     if not IS_WIN:
-        return "ffmpeg"
+        return binary
 
     spots = [
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "ffmpeg.exe"),
+        os.path.join(base, "ffmpeg.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "ffmpeg", "bin", "ffmpeg.exe"),
         os.path.join(os.environ.get("USERPROFILE", ""), "ffmpeg", "bin", "ffmpeg.exe"),
         os.path.join(os.environ.get("PROGRAMFILES", ""), "ffmpeg", "bin", "ffmpeg.exe"),
@@ -64,7 +93,18 @@ def find_ffmpeg():
         if p and os.path.isfile(p):
             return p
 
-    return "ffmpeg"
+    return binary
+
+
+def get_base_path():
+    """Return the base path for resources.
+
+    If the application is frozen by PyInstaller, return sys._MEIPASS which
+    contains bundled data. Otherwise return the directory of this file.
+    """
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", os.path.abspath(os.path.dirname(__file__)))
+    return os.path.abspath(os.path.dirname(__file__))
 
 
 def _popen_kwargs():
