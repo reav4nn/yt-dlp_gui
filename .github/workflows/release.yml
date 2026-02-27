@@ -30,12 +30,11 @@ jobs:
           $ytdlpUrl = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
           Invoke-WebRequest -Uri $ytdlpUrl -OutFile bin\yt-dlp.exe
 
-          # try to fetch checksum for yt-dlp from several common locations
+          # try to fetch checksum for yt-dlp from current official locations
           $ytdlpChecksumUrls = @( 
-            'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe.sha256',
-            'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.sha256',
-            'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.sha256sum',
-            'https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA256SUMS'
+            'https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS',
+            'https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA256SUMS',
+            'https://github.com/yt-dlp/yt-dlp/releases/latest/download/sha256sums.txt'
           )
 
           function Get-RemoteChecksum($urls, $name) {
@@ -45,9 +44,8 @@ jobs:
                 if ($resp.StatusCode -eq 200 -or $resp.RawContent) {
                   $txt = $resp.Content -replace "\r", "" -split "\n"
                   foreach ($line in $txt) {
-                    if ($line -match "^([0-9a-fA-F]{64})\b") { return $matches[1] }
-                    if ($line -match "^([0-9a-fA-F]{64}).*\b$name\b") { return $matches[1] }
-                    if ($line -match "^([0-9a-fA-F]{64})\s+\*?$name") { return $matches[1] }
+                    # Exact match for the filename in the checksum list
+                    if ($line -match "^([0-9a-fA-F]{64})\s+\*?$name\b") { return $matches[1] }
                   }
                 }
               } catch { }
@@ -56,7 +54,6 @@ jobs:
           }
 
           $expected = Get-RemoteChecksum $ytdlpChecksumUrls 'yt-dlp.exe'
-          if (-not $expected) { $expected = Get-RemoteChecksum $ytdlpChecksumUrls 'yt-dlp' }
           if (-not $expected) { Write-Host 'Warning: no yt-dlp checksum found; failing for strict verification' ; exit 1 }
 
           $actual = (Get-FileHash bin\yt-dlp.exe -Algorithm SHA256).Hash.ToLower()
@@ -81,49 +78,6 @@ jobs:
           if (-not $expected_ff) { Write-Host 'Warning: no ffmpeg zip checksum found; failing for strict verification' ; exit 1 }
           $actual_ff = (Get-FileHash ffmpeg.zip -Algorithm SHA256).Hash.ToLower()
           if ($actual_ff -ne $expected_ff.ToLower()) { Write-Host "ffmpeg checksum mismatch: $actual_ff != $expected_ff" ; exit 1 }
-
-      - name: Prepare binaries (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          set -euo pipefail
-          mkdir -p bin
-
-          # download official yt-dlp linux binary (latest release)
-          curl -fSL -o bin/yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux
-          chmod +x bin/yt-dlp
-
-          # Checksum URL list for yt-dlp
-          YTDLP_CHECK_URLS=(
-            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS"
-            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA256SUMS"
-          )
-
-          expected=''
-          for u in "${YTDLP_CHECK_URLS[@]}"; do
-            if curl -fsSL "$u" -o /tmp/yt-dlp.sha; then
-              # Look for yt-dlp_linux entry (ignoring \r line endings and .zip extensions)
-              token=$(grep 'yt-dlp_linux' /tmp/yt-dlp.sha | grep -v '\.zip' | grep -Eo '[0-9a-fA-F]{64}' | head -n1 || true)
-              if [ -n "$token" ]; then expected="$token"; break; fi
-            fi
-          done
-
-          if [ -z "$expected" ]; then echo "No yt-dlp checksum found; failing for strict verification" >&2; exit 1; fi
-          actual=$(sha256sum bin/yt-dlp | awk '{print $1}')
-          if [ "$actual" != "$expected" ]; then echo "yt-dlp checksum mismatch: $actual != $expected" >&2; exit 1; fi
-
-          # download ffmpeg static build and its MD5 checksum
-          curl -fSL -o ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
-          curl -fSL -o /tmp/ffmpeg.md5 https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz.md5
-          tar -xJf ffmpeg.tar.xz
-          find . -type f -name ffmpeg -exec cp {} bin/ \;
-          find . -type f -name ffprobe -exec cp {} bin/ \;
-          chmod +x bin/yt-dlp bin/ffmpeg bin/ffprobe || true
-          
-          # verify ffmpeg tar using MD5 checksum
-          expected_ff=$(awk '{print $1}' /tmp/ffmpeg.md5 | head -n1 || true)
-          if [ -z "$expected_ff" ]; then echo "No ffmpeg checksum found; failing" >&2; exit 1; fi
-          actual_ff=$(md5sum ffmpeg.tar.xz | awk '{print $1}')
-          if [ "$actual_ff" != "$expected_ff" ]; then echo "ffmpeg checksum mismatch: $actual_ff != $expected_ff" >&2; exit 1; fi
 
       - name: Install Python and build deps
         uses: actions/setup-python@v5
