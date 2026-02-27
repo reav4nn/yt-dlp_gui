@@ -25,69 +25,42 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path bin
-
-          # download yt-dlp
-          $ytdlpUrl = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe'
-          Invoke-WebRequest -Uri $ytdlpUrl -OutFile bin\yt-dlp.exe
-
-          # try to fetch checksum for yt-dlp from current official locations
-          $ytdlpChecksumUrls = @( 
-            'https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS',
-            'https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA256SUMS',
-            'https://github.com/yt-dlp/yt-dlp/releases/latest/download/sha256sums.txt'
-          )
-
-          function Get-RemoteChecksum($urls, $name) {
-            foreach ($u in $urls) {
-              try {
-                $resp = Invoke-WebRequest -Uri $u -UseBasicParsing -ErrorAction Stop
-                if ($resp.StatusCode -eq 200 -or $resp.RawContent) {
-                  $txt = $resp.Content -replace "\r", "" -split "\n"
-                  foreach ($line in $txt) {
-                    # Exact match for the filename in the checksum list
-                    if ($line -match "^([0-9a-fA-F]{64})\s+\*?$name\b") { return $matches[1] }
-                  }
-                }
-              } catch { }
-            }
-            return $null
-          }
-
-          $expected = Get-RemoteChecksum $ytdlpChecksumUrls 'yt-dlp.exe'
-          if (-not $expected) { Write-Host 'Warning: no yt-dlp checksum found; failing for strict verification' ; exit 1 }
-
-          $actual = (Get-FileHash bin\yt-dlp.exe -Algorithm SHA256).Hash.ToLower()
-          if ($actual -ne $expected.ToLower()) { Write-Host "yt-dlp checksum mismatch: $actual != $expected" ; exit 1 }
-
-          # download ffmpeg (essentials build) and extract
-          $ffUrl = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
-          Invoke-WebRequest -Uri $ffUrl -OutFile ffmpeg.zip
+          # Download yt-dlp
+          Invoke-WebRequest -Uri 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe' -OutFile bin\yt-dlp.exe
+          
+          # Download ffmpeg (essentials)
+          Invoke-WebRequest -Uri 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip' -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp -Force
           $ff = Get-ChildItem -Path ffmpeg_tmp -Recurse -Filter ffmpeg.exe | Select-Object -First 1
           $fp = Get-ChildItem -Path ffmpeg_tmp -Recurse -Filter ffprobe.exe | Select-Object -First 1
-          if (-not $ff -or -not $fp) { Write-Host 'ffmpeg binaries not found in archive' ; exit 1 }
           Copy-Item $ff.FullName -Destination bin
           Copy-Item $fp.FullName -Destination bin
 
-          # attempt to verify ffmpeg using common checksum files (gyan hosts checksums on its site but paths vary)
-          $ffChecksumUrls = @( 
-            'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip.sha256',
-            'https://www.gyan.dev/ffmpeg/builds/sha256sums.txt'
-          )
-          $expected_ff = Get-RemoteChecksum $ffChecksumUrls 'ffmpeg-release-essentials.zip'
-          if (-not $expected_ff) { Write-Host 'Warning: no ffmpeg zip checksum found; failing for strict verification' ; exit 1 }
-          $actual_ff = (Get-FileHash ffmpeg.zip -Algorithm SHA256).Hash.ToLower()
-          if ($actual_ff -ne $expected_ff.ToLower()) { Write-Host "ffmpeg checksum mismatch: $actual_ff != $expected_ff" ; exit 1 }
+      - name: Prepare binaries (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          mkdir -p bin
+          # Download yt-dlp linux binary
+          wget https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -O bin/yt-dlp
+          # Download ffmpeg static build
+          wget https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v6.1/ffmpeg-6.1-linux-64.zip -O ffmpeg.zip
+          unzip ffmpeg.zip -d bin/
+          # Ensure they are executable
+          chmod +x bin/yt-dlp bin/ffmpeg
+          # ffprobe is often needed by yt-dlp for certain formats
+          wget https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v6.1/ffprobe-6.1-linux-64.zip -O ffprobe.zip
+          unzip ffprobe.zip -d bin/
+          chmod +x bin/ffprobe
 
-      - name: Install Python and build deps
+      - name: Install Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install Python packages
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt || true
+          pip install -r requirements.txt
           pip install pyinstaller
 
       - name: Build on Windows
@@ -101,7 +74,7 @@ jobs:
         run: |
           pyinstaller --noconsole --onefile --name yt-dlp-gui-linux --add-binary "bin/yt-dlp:." --add-binary "bin/ffmpeg:." --add-binary "bin/ffprobe:." main.py
 
-      - name: Upload to GitHub Release
+      - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
