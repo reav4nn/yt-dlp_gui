@@ -196,7 +196,22 @@ class App(ctk.CTk):
         if sel == "none":
             cookies = None
         elif sel == "opera":
-            cookies = ["opera"]
+            appdata = os.environ.get("APPDATA", "")
+            opera_root = os.path.join(appdata, "Opera Software") if appdata else None
+            choices = []
+            if opera_root:
+                if os.path.isdir(os.path.join(opera_root, "Opera GX Stable")):
+                    choices.append("opera")
+                if os.path.isdir(os.path.join(opera_root, "Opera Stable")):
+                    choices.append("opera")
+            if choices:
+                choices.extend([b for b in ("chrome", "chromium", "brave") if b not in choices])
+            if choices:
+                if "opera" not in choices:
+                    choices.append("opera")
+                cookies = choices
+            else:
+                cookies = ["opera"]
         elif sel == "chrome":
             cookies = ["chrome", "chromium", "brave"]
         else:

@@ -3,23 +3,38 @@ __pycache__/
 .idea/
 .DS_Store
 *.log
+*.py[cod]
 *.pyc
 *.pyo
-.env
-dist/
-build/
-*.egg-info/
-*.spec
-venv/
+
+# Environments
 .venv/
+venv/
 env/
-.env
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Python caches
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+
+# Logs and reports
+*.log
+.coverage
+htmlcov/
 
 # Build artifacts
-dist/
 build/
-*.spec
+dist/
+pip-wheel-metadata/
 *.egg-info/
+*.spec
+bin/
 
 # Downloaded binaries (do NOT commit these)
 yt-dlp
@@ -28,6 +43,12 @@ ffmpeg
 ffmpeg.exe
 ffprobe
 ffprobe.exe
+yt-dlp-gui-windows.spec
 
-# Other folders
+# Progress and local state
+progress/
+
+# Misc
 downloads/
+*.whl
+*.egg
