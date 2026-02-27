@@ -196,11 +196,7 @@ class App(ctk.CTk):
         if sel == "none":
             cookies = None
         elif sel == "opera":
-            cookies = [
-                "opera:profile=Opera GX Stable",
-                "opera:profile=Opera Stable",
-                "opera",
-            ]
+            cookies = ["opera"]
         elif sel == "chrome":
             cookies = ["chrome", "chromium", "brave"]
         else:
