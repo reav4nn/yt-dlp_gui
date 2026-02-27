@@ -88,28 +88,31 @@ jobs:
           set -euo pipefail
           mkdir -p bin
 
-          # download yt-dlp
-          curl -fSL -o bin/yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp
+          # download official yt-dlp linux binary (latest release)
+          curl -fSL -o bin/yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux
+          chmod +x bin/yt-dlp
 
-          # try several checksum locations for yt-dlp
+          # prefer official SHA2-256SUMS from the yt-dlp release; fallback to SHA256SUMS
           YTDLP_CHECK_URLS=(
-            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.sha256"
-            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.sha256sum"
+            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS"
             "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA256SUMS"
           )
+
           expected=''
           for u in "${YTDLP_CHECK_URLS[@]}"; do
             if curl -fsSL "$u" -o /tmp/yt-dlp.sha; then
-              # try to extract a 64-hex token
-              token=$(grep -Eo '^[0-9a-fA-F]{64}' /tmp/yt-dlp.sha | head -n1 || true)
-              if [ -n "$token" ]; then expected="$token"; break; fi
-              token=$(grep -Eo '[0-9a-fA-F]{64}' /tmp/yt-dlp.sha | head -n1 || true)
+              # look for an entry that references yt-dlp_linux first, then yt-dlp
+              token=$(grep -Eo '[0-9a-fA-F]{64}\s+\S*yt-dlp_linux' /tmp/yt-dlp.sha | grep -Eo '[0-9a-fA-F]{64}' | head -n1 || true)
+              if [ -z "$token" ]; then
+                token=$(grep -Eo '[0-9a-fA-F]{64}\s+\S*yt-dlp' /tmp/yt-dlp.sha | grep -Eo '[0-9a-fA-F]{64}' | head -n1 || true)
+              fi
               if [ -n "$token" ]; then expected="$token"; break; fi
             fi
           done
+
           if [ -z "$expected" ]; then echo "No yt-dlp checksum found; failing for strict verification" >&2; exit 1; fi
           actual=$(sha256sum bin/yt-dlp | awk '{print $1}')
-          if [ "$actual" != "$expected" ]; then echo "yt-dlp checksum mismatch" >&2; exit 1; fi
+          if [ "$actual" != "$expected" ]; then echo "yt-dlp checksum mismatch: $actual != $expected" >&2; exit 1; fi
 
           # download ffmpeg static build and its checksums (johnvansickle provides static builds and checksum file)
           curl -fSL -o ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
