@@ -92,10 +92,8 @@ jobs:
           curl -fSL -o bin/yt-dlp https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux
           chmod +x bin/yt-dlp
 
-          # prefer official SHA2-256SUMS from the yt-dlp release; fallback to SHA256SUMS
-          # Try possible current checksum file names from yt-dlp releases
+          # Checksum URL list for yt-dlp
           YTDLP_CHECK_URLS=(
-            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/sha256sums.txt"
             "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS"
             "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA256SUMS"
           )
@@ -103,11 +101,8 @@ jobs:
           expected=''
           for u in "${YTDLP_CHECK_URLS[@]}"; do
             if curl -fsSL "$u" -o /tmp/yt-dlp.sha; then
-              # look for an entry that references yt-dlp_linux first, then yt-dlp
-              token=$(grep -Eo '[0-9a-fA-F]{64}\s+\S*yt-dlp_linux' /tmp/yt-dlp.sha | grep -Eo '[0-9a-fA-F]{64}' | head -n1 || true)
-              if [ -z "$token" ]; then
-                token=$(grep -Eo '[0-9a-fA-F]{64}\s+\S*yt-dlp' /tmp/yt-dlp.sha | grep -Eo '[0-9a-fA-F]{64}' | head -n1 || true)
-              fi
+              # Look for yt-dlp_linux entry (ignoring \r line endings and .zip extensions)
+              token=$(grep 'yt-dlp_linux' /tmp/yt-dlp.sha | grep -v '\.zip' | grep -Eo '[0-9a-fA-F]{64}' | head -n1 || true)
               if [ -n "$token" ]; then expected="$token"; break; fi
             fi
           done
@@ -116,18 +111,19 @@ jobs:
           actual=$(sha256sum bin/yt-dlp | awk '{print $1}')
           if [ "$actual" != "$expected" ]; then echo "yt-dlp checksum mismatch: $actual != $expected" >&2; exit 1; fi
 
-          # download ffmpeg static build and its checksums (johnvansickle provides static builds and checksum file)
+          # download ffmpeg static build and its MD5 checksum
           curl -fSL -o ffmpeg.tar.xz https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz
-          curl -fSL -o /tmp/ffmpeg.sha256s https://johnvansickle.com/ffmpeg/releases/sha256sums.txt
+          curl -fSL -o /tmp/ffmpeg.md5 https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz.md5
           tar -xJf ffmpeg.tar.xz
           find . -type f -name ffmpeg -exec cp {} bin/ \;
           find . -type f -name ffprobe -exec cp {} bin/ \;
           chmod +x bin/yt-dlp bin/ffmpeg bin/ffprobe || true
-          # verify ffmpeg tar checksum using johnvansickle's sums
-          expected_ff=$(grep -Eo '[0-9a-fA-F]{64}' /tmp/ffmpeg.sha256s | head -n1 || true)
+          
+          # verify ffmpeg tar using MD5 checksum
+          expected_ff=$(awk '{print $1}' /tmp/ffmpeg.md5 | head -n1 || true)
           if [ -z "$expected_ff" ]; then echo "No ffmpeg checksum found; failing" >&2; exit 1; fi
-          actual_ff=$(sha256sum ffmpeg.tar.xz | awk '{print $1}')
-          if [ "$actual_ff" != "$expected_ff" ]; then echo "ffmpeg checksum mismatch" >&2; exit 1; fi
+          actual_ff=$(md5sum ffmpeg.tar.xz | awk '{print $1}')
+          if [ "$actual_ff" != "$expected_ff" ]; then echo "ffmpeg checksum mismatch: $actual_ff != $expected_ff" >&2; exit 1; fi
 
       - name: Install Python and build deps
         uses: actions/setup-python@v5
