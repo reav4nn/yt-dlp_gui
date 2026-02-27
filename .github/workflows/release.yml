@@ -93,7 +93,9 @@ jobs:
           chmod +x bin/yt-dlp
 
           # prefer official SHA2-256SUMS from the yt-dlp release; fallback to SHA256SUMS
+          # Try possible current checksum file names from yt-dlp releases
           YTDLP_CHECK_URLS=(
+            "https://github.com/yt-dlp/yt-dlp/releases/latest/download/sha256sums.txt"
             "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS"
             "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA256SUMS"
           )
