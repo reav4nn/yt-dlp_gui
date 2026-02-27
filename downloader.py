@@ -223,7 +223,13 @@ class Downloader:
 
     def get_video_info(self, url, cookies_browser="firefox"):
         cmd = [self.ytdlp_path, "--dump-json", "--no-download"]
-        cmd += self._base_args(url, cookies_browser)
+        # support list of cookie sources; use the first for info
+        cb = None
+        if isinstance(cookies_browser, (list, tuple)) and cookies_browser:
+            cb = cookies_browser[0]
+        else:
+            cb = cookies_browser
+        cmd += self._base_args(url, cb)
         cmd += ["--legacy-server-connect"]
         cmd.append(url)
 
@@ -279,51 +285,68 @@ class Downloader:
 
         def _run():
             try:
-                strategies = self._build_strategies(url, format_str, cookies_browser)
+                # allow prioritized cookie sources (list) or single value
+                cookie_choices = cookies_browser if isinstance(cookies_browser, (list, tuple)) else [cookies_browser]
 
-                for i, (label, cmd) in enumerate(strategies):
+                for choice_idx, choice in enumerate(cookie_choices):
                     if self.cancelled:
                         return
 
-                    if i > 0 and on_progress:
-                        on_progress(f"[retry {i}/{len(strategies)-1}] trying: {label}...")
-
-                    ok, had_http_error, had_cookie_error = self._run_attempt(cmd, on_progress)
-
-                    if ok:
-                        if on_finished and not self.cancelled:
-                            on_finished()
-                        return
-
-                    if self.cancelled:
-                        return
-
-                    if had_cookie_error:
-                        # browser is locking the cookie db, retrying with same browser is pointless
+                    if choice is None:
                         if on_progress:
-                            on_progress("[warn] browser is locking cookies, retrying without cookies...")
-                            on_progress("[warn] close the browser for cookie access, or this will try without them")
+                            on_progress(f"[info] trying without cookies...")
+                    else:
+                        if on_progress:
+                            on_progress(f"[info] trying cookies-from-browser: {choice} (option {choice_idx+1}/{len(cookie_choices)})")
 
-                        # rebuild strategies without cookies and run them
-                        no_cookie_strategies = self._build_strategies(url, format_str, None)
-                        for j, (nc_label, nc_cmd) in enumerate(no_cookie_strategies):
-                            if self.cancelled:
-                                return
-                            if j > 0 and on_progress:
-                                on_progress(f"[retry {j}/{len(no_cookie_strategies)-1}] (no cookies) {nc_label}...")
+                    strategies = self._build_strategies(url, format_str, choice)
 
-                            nc_ok, _, _ = self._run_attempt(nc_cmd, on_progress)
-                            if nc_ok:
-                                if on_finished and not self.cancelled:
-                                    on_finished()
-                                return
+                    for i, (label, cmd) in enumerate(strategies):
+                        if self.cancelled:
+                            return
 
-                        if not self.cancelled and on_error:
-                            on_error("failed. close the browser and try again for cookie access")
-                        return
+                        if i > 0 and on_progress:
+                            on_progress(f"[retry {i}/{len(strategies)-1}] trying: {label}...")
 
-                    if not had_http_error and i == 0:
-                        continue
+                        ok, had_http_error, had_cookie_error = self._run_attempt(cmd, on_progress)
+
+                        if ok:
+                            if on_finished and not self.cancelled:
+                                on_finished()
+                            return
+
+                        if self.cancelled:
+                            return
+
+                        if had_cookie_error:
+                            # browser cookie DB is locked or unreadable; retry same choice without cookies
+                            if on_progress:
+                                on_progress("[warn] browser is locking cookies, retrying without cookies...")
+                                on_progress("[warn] close the browser for cookie access, or this will try without them")
+
+                            # rebuild strategies without cookies and run them
+                            no_cookie_strategies = self._build_strategies(url, format_str, None)
+                            for j, (nc_label, nc_cmd) in enumerate(no_cookie_strategies):
+                                if self.cancelled:
+                                    return
+                                if j > 0 and on_progress:
+                                    on_progress(f"[retry {j}/{len(no_cookie_strategies)-1}] (no cookies) {nc_label}...")
+
+                                nc_ok, _, _ = self._run_attempt(nc_cmd, on_progress)
+                                if nc_ok:
+                                    if on_finished and not self.cancelled:
+                                        on_finished()
+                                    return
+
+                            # this cookie choice failed due to cookie issues; try next cookie source
+                            if not self.cancelled and on_progress:
+                                on_progress(f"[warn] cookie option '{choice}' failed; trying next cookie source if available...")
+                            break
+
+                        if not had_http_error and i == 0:
+                            continue
+
+                    # continue to next cookie choice if current didn't yield success
 
                 if not self.cancelled and on_error:
                     on_error("all download strategies failed")

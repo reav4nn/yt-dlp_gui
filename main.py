@@ -51,10 +51,11 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(settings_frame, text="browser cookies").pack(side="left", padx=(0, 6))
         self.browser_var = ctk.StringVar(value="firefox")
+        # simplified browser choices; selections include sensible fallbacks
         self.browser_menu = ctk.CTkOptionMenu(
             settings_frame, variable=self.browser_var,
-            values=["firefox", "chrome", "chromium", "brave", "edge", "opera", "none"],
-            width=120
+            values=["firefox", "chrome", "opera", "edge", "none"],
+            width=140
         )
         self.browser_menu.pack(side="left", padx=(0, 16))
 
@@ -190,9 +191,20 @@ class App(ctk.CTk):
 
         self.downloader.output_dir = self.dir_var.get()
 
-        cookies = self.browser_var.get()
-        if cookies == "none":
+        sel = self.browser_var.get()
+        # map user-facing choices to prioritized yt-dlp cookie sources
+        if sel == "none":
             cookies = None
+        elif sel == "opera":
+            cookies = [
+                "opera:profile=Opera GX Stable",
+                "opera:profile=Opera Stable",
+                "opera",
+            ]
+        elif sel == "chrome":
+            cookies = ["chrome", "chromium", "brave"]
+        else:
+            cookies = sel
 
         self._set_status("downloading...")
 
