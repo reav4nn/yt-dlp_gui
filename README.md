@@ -1,54 +1,61 @@
-# yt-dlp GUI — Standalone executables
+# yt-dlp GUI
 
-This project provides a small GUI wrapper for `yt-dlp` designed to be distributed as a
-standalone executable (Windows and Linux). Official builds are published as GitHub Releases
-so end users can download a single executable with no local Python or dependency setup.
+A simple GUI for [yt-dlp](https://github.com/yt-dlp/yt-dlp) built with CustomTkinter. Supports YouTube and most other sites that yt-dlp can handle.
 
-**Important:** Do NOT commit bundled binaries (`yt-dlp`, `ffmpeg`, etc.) to the repository.
-Prebuilt executables are available on the Releases page for each tag.
+## features
 
-How to get the app
+- **format presets** — best (mp4 + m4a), mp4 (h264), mp3
+- **cookies** — manual `cookies.txt`, or read directly from firefox / chrome / edge / opera / opera gx
+- **smart youtube fallback** — tries the default yt-dlp client first, then falls back to android and ios clients if that fails (no Node.js or PO token needed for the fallbacks)
+- **auto-update** — if a YouTube signature challenge is detected, the app downloads the latest `yt-dlp.exe` once and retries automatically (Windows only)
+- **progress display** — shows title, speed, ETA, and file size while downloading
 
-- Visit the repository's Releases page and download the asset matching your OS (Windows `.exe` or Linux binary).
-- On Windows: double-click the downloaded `.exe` to run.
-- On Linux: make the downloaded file executable (`chmod +x yt-dlp-gui-...-linux`) and run it.
+## getting started
 
-CI / Builds
+### pre-built executable (Windows)
 
-This project uses GitHub Actions to produce PyInstaller one-file builds for both
-Windows and Ubuntu. When a tag like `v1.2.3` is pushed, the workflow downloads
-official `yt-dlp` and `ffmpeg` binaries for the current platform, bundles them into
-the executable, builds with PyInstaller (`--onefile --noconsole`), and attaches the
-artifacts to the created GitHub Release.
+Download the latest release from the Releases page — it's a single `.exe` with everything bundled (yt-dlp, ffmpeg, ffprobe). Just double-click it.
 
-Security notes
+### run from source
 
-- The workflow downloads official binary releases over HTTPS at build time; the
-  repository does not contain these binaries.
-- The application locates bundled binaries at runtime using a secure base path
-  (PyInstaller's `_MEIPASS`) when frozen and falls back to PATH if not bundled.
+You need Python 3.10+ and the dependencies listed in `requirements.txt`.
 
-If you are a developer and want to build locally
-
-1. Ensure you have Python 3.10 installed.
-2. Create a virtual environment and install dev deps:
-
-```
-python -m venv .venv
-source .venv/bin/activate  # or .venv\Scripts\activate on Windows
-pip install -r requirements.txt pyinstaller
+```bash
+git clone <repo-url>
+cd yt-dlp_gui
+pip install -r requirements.txt
+python main.py
 ```
 
-3. Place official `yt-dlp` and `ffmpeg` binaries in a `bin/` folder, then:
+You also need `yt-dlp` and `ffmpeg` either in your `PATH` or placed in a `bin/` folder next to `main.py`.
 
+## cookie setup
+
+For YouTube videos that require sign-in (age-restricted, etc.):
+
+1. Log in to YouTube in your browser.
+2. Install the [Get cookies.txt LOCALLY](https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc) extension.
+3. Click the extension icon on any YouTube page and export `cookies.txt`.
+4. In the app, set the cookie source to **manual** and select the exported file.
+
+Alternatively, pick your browser from the dropdown and the app will read cookies directly from it (the browser must be closed or have cookies unlocked).
+
+## building the executable
+
+Make sure you have `yt-dlp.exe`, `ffmpeg.exe`, and `ffprobe.exe` in a `bin/` folder, then run:
+
+```bash
+pip install pyinstaller
+pyinstaller --noconsole --onefile --name yt-dlp-gui-windows ^
+  --add-binary "bin\yt-dlp.exe;." ^
+  --add-binary "bin\ffmpeg.exe;." ^
+  --add-binary "bin\ffprobe.exe;." ^
+  main.py
 ```
-pyinstaller --noconsole --onefile --name yt-dlp-gui --add-binary "bin/yt-dlp:." --add-binary "bin/ffmpeg:." main.py
-```
 
-This will create a standalone executable in `dist/`.
+The output will be in `dist/`.
 
-Questions or problems
+## notes
 
-If you need help or want changes to the build workflow (e.g. other Linux targets,
-additional verification of downloaded assets), open an issue and describe the
-requested change.
+- The bundled binaries are **not** committed to the repository. Download them separately from the official yt-dlp and ffmpeg releases before building.
+- On first launch the app checks that yt-dlp and ffmpeg are reachable and disables the download button if either is missing.

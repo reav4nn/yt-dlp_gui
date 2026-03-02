@@ -3,112 +3,95 @@ import threading
 import re
 import os
 import sys
-import json
 import shutil
 import signal
+import shlex
+import urllib.request
 from urllib.parse import urlparse
-
-
-DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0"
-
-BROWSER_HEADERS = {
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
-    "Sec-Fetch-Mode": "navigate",
-}
 
 IS_WIN = sys.platform == "win32"
 
+YOUTUBE_HOST_HINTS  = ("youtube.com", "youtu.be", "music.youtube.com")
+YTDLP_GUI_BIN_DIR   = os.path.join(os.path.expanduser("~"), ".yt-dlp-gui", "bin")
+YTDLP_OVERRIDE_PATH = os.path.join(YTDLP_GUI_BIN_DIR, "yt-dlp.exe")
+YTDLP_LATEST_URL    = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
 
-def find_ytdlp():
-    """Locate the yt-dlp binary.
+PROGRESS_TEMPLATE = (
+    "%(progress.status)s__SEP__"
+    "%(progress._total_bytes_estimate_str)s__SEP__"
+    "%(progress._percent_str)s__SEP__"
+    "%(progress._speed_str)s__SEP__"
+    "%(progress._eta_str)s__SEP__"
+    "%(info.title)s"
+)
 
-    Priority order:
-    1. bundled binary inside frozen app base path
-    2. PATH (shutil.which)
-    3. common platform-specific locations
-    Falls back to the binary name so subprocess can use PATH resolution.
-    """
-    binary = "yt-dlp.exe" if IS_WIN else "yt-dlp"
-
-    # 1) check bundled base path first (for PyInstaller onefile)
-    base = get_base_path()
-    bundled = os.path.join(base, binary)
-    if os.path.isfile(bundled):
-        return bundled
-
-    # 2) check PATH
-    found = shutil.which(binary)
-    if found:
-        return found
-
-    # 3) common platform-specific locations
-    if not IS_WIN:
-        return binary
-
-    spots = [
-        os.path.join(base, "yt-dlp.exe"),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "yt-dlp", "yt-dlp.exe"),
-        os.path.join(os.environ.get("USERPROFILE", ""), "yt-dlp", "yt-dlp.exe"),
-        os.path.join(os.environ.get("USERPROFILE", ""), "Downloads", "yt-dlp.exe"),
-        os.path.join(os.environ.get("PROGRAMFILES", ""), "yt-dlp", "yt-dlp.exe"),
-        "C:\\yt-dlp\\yt-dlp.exe",
-    ]
-    for p in spots:
-        if p and os.path.isfile(p):
-            return p
-
-    return binary
+PRESETS = {
+    "best": "-f bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/bv*+ba/b",
+    "mp4":  "-f bv*[vcodec^=avc]+ba[ext=m4a]/b",
+    "mp3":  "--extract-audio --audio-format mp3 --audio-quality 0",
+}
+DEFAULT_FORMAT = PRESETS["best"]
 
 
-def find_ffmpeg():
-    """Locate ffmpeg binary with the same priority as yt-dlp.
+# helpers
 
-    Returns the path to ffmpeg/ffmpeg.exe or the binary name fallback.
-    """
-    binary = "ffmpeg.exe" if IS_WIN else "ffmpeg"
-
-    # 1) check bundled base path first
-    base = get_base_path()
-    bundled = os.path.join(base, binary)
-    if os.path.isfile(bundled):
-        return bundled
-
-    # 2) check PATH
-    found = shutil.which(binary)
-    if found:
-        return found
-
-    if not IS_WIN:
-        return binary
-
-    spots = [
-        os.path.join(base, "ffmpeg.exe"),
-        os.path.join(os.environ.get("LOCALAPPDATA", ""), "ffmpeg", "bin", "ffmpeg.exe"),
-        os.path.join(os.environ.get("USERPROFILE", ""), "ffmpeg", "bin", "ffmpeg.exe"),
-        os.path.join(os.environ.get("PROGRAMFILES", ""), "ffmpeg", "bin", "ffmpeg.exe"),
-        "C:\\ffmpeg\\bin\\ffmpeg.exe",
-    ]
-    for p in spots:
-        if p and os.path.isfile(p):
-            return p
-
-    return binary
-
-
-def get_base_path():
-    """Return the base path for resources.
-
-    If the application is frozen by PyInstaller, return sys._MEIPASS which
-    contains bundled data. Otherwise return the directory of this file.
-    """
+def get_base_path() -> str:
+    """Returns _MEIPASS when bundled with PyInstaller, otherwise the script directory."""
     if getattr(sys, "frozen", False):
         return getattr(sys, "_MEIPASS", os.path.abspath(os.path.dirname(__file__)))
     return os.path.abspath(os.path.dirname(__file__))
 
 
-def _popen_kwargs():
-    # hide console window on windows and setup process groups
+def find_ytdlp() -> str:
+    """Locate the yt-dlp binary. Priority: user override -> bundled -> PATH -> common paths."""
+    binary = "yt-dlp.exe" if IS_WIN else "yt-dlp"
+    base   = get_base_path()
+
+    if IS_WIN and os.path.isfile(YTDLP_OVERRIDE_PATH):
+        return YTDLP_OVERRIDE_PATH
+
+    bundled = os.path.join(base, binary)
+    if os.path.isfile(bundled):
+        return bundled
+
+    found = shutil.which(binary)
+    if found:
+        return found
+
+    if IS_WIN:
+        for p in [
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "yt-dlp", "yt-dlp.exe"),
+            os.path.join(os.environ.get("USERPROFILE",  ""), "Downloads", "yt-dlp.exe"),
+            os.path.join(os.environ.get("PROGRAMFILES", ""), "yt-dlp", "yt-dlp.exe"),
+        ]:
+            if p and os.path.isfile(p):
+                return p
+
+    return binary
+
+
+def find_ffmpeg() -> str:
+    """Locate the ffmpeg binary."""
+    binary  = "ffmpeg.exe" if IS_WIN else "ffmpeg"
+    base    = get_base_path()
+    bundled = os.path.join(base, binary)
+    if os.path.isfile(bundled):
+        return bundled
+    found = shutil.which(binary)
+    if found:
+        return found
+    if IS_WIN:
+        for p in [
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "ffmpeg", "bin", "ffmpeg.exe"),
+            os.path.join(os.environ.get("PROGRAMFILES", ""), "ffmpeg", "bin", "ffmpeg.exe"),
+        ]:
+            if p and os.path.isfile(p):
+                return p
+    return binary
+
+
+def _popen_kwargs() -> dict:
+    """Platform-specific kwargs for subprocess.Popen."""
     kw = {}
     if IS_WIN:
         si = subprocess.STARTUPINFO()
@@ -121,194 +104,228 @@ def _popen_kwargs():
     return kw
 
 
-def _referer_for_url(url):
-    parsed = urlparse(url)
-    if parsed.scheme and parsed.hostname:
-        return f"{parsed.scheme}://{parsed.hostname}/"
-    return "https://www.google.com/"
+def _is_youtube_url(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return any(hint in host for hint in YOUTUBE_HOST_HINTS)
 
 
-def _origin_for_url(url):
-    parsed = urlparse(url)
-    if parsed.scheme and parsed.hostname:
-        return f"{parsed.scheme}://{parsed.hostname}"
-    return None
-
+# downloader
 
 class Downloader:
-    def __init__(self, output_dir=None):
-        self.output_dir = output_dir or os.path.join(os.path.expanduser("~"), "Downloads")
-        self.process = None
-        self.cancelled = False
-        self.ytdlp_path = find_ytdlp()
+    """Manages the yt-dlp subprocess."""
+
+    def __init__(self, output_dir: str | None = None):
+        self.output_dir  = output_dir or os.path.join(os.path.expanduser("~"), "Downloads")
+        self.process     = None
+        self.cancelled   = False
+        self.ytdlp_path  = find_ytdlp()
         self.ffmpeg_path = find_ffmpeg()
 
-    def _base_args(self, url, cookies_browser):
-        # stuff that goes into every command
-        cmd = []
-        if cookies_browser:
-            cmd += ["--cookies-from-browser", cookies_browser]
-
-        referer = _referer_for_url(url)
-        origin = _origin_for_url(url)
-
-        cmd += [
-            "--user-agent", DEFAULT_USER_AGENT,
-            "--referer", referer,
-            "--geo-bypass",
-            "--no-check-certificate",
-            "--merge-output-format", "mp4",
-            "--newline",
-            "-o", os.path.join(self.output_dir, "%(title)s.%(ext)s"),
-        ]
-
-        for k, v in BROWSER_HEADERS.items():
-            cmd += ["--add-header", f"{k}:{v}"]
-
-        if origin:
-            cmd += ["--add-header", f"Origin:{origin}"]
-
-        return cmd
-
-    def _build_strategies(self, url, format_str, cookies_browser):
+    def _build_cmd(
+        self,
+        url: str,
+        format_str: str,
+        cookies_file: str | None,
+        cookies_browser: str | None,
+        extra_args: list[str] | None = None,
+    ) -> list[str]:
+        """Build a minimal yt-dlp command — no custom headers or user-agents."""
         yt = self.ytdlp_path
         ff = self.ffmpeg_path
-        strategies = []
 
-        # 1: normal
-        cmd = [yt, "-f", format_str]
-        cmd += self._base_args(url, cookies_browser)
-        if ff != "ffmpeg":
-            cmd += ["--ffmpeg-location", ff]
-        cmd.append(url)
-        strategies.append(("default", cmd))
-
-        # 2: hls fallback + legacy server connect
-        cmd = [yt, "-f", "best[protocol=m3u8]/best"]
-        cmd += self._base_args(url, cookies_browser)
-        cmd += ["--legacy-server-connect"]
-        if ff != "ffmpeg":
-            cmd += ["--ffmpeg-location", ff]
-        cmd.append(url)
-        strategies.append(("hls + legacy-server-connect", cmd))
-
-        # 3: ffmpeg external downloader + legacy
-        cmd = [yt, "-f", format_str]
-        cmd += self._base_args(url, cookies_browser)
-        cmd += [
-            "--legacy-server-connect",
-            "--downloader", ff,
-            "--downloader-args", f"ffmpeg:-headers \"User-Agent: {DEFAULT_USER_AGENT}\"",
+        cmd = [
+            yt,
+            "--newline",
+            "--no-simulate",
+            "--progress",
+            "--progress-template", PROGRESS_TEMPLATE,
+            "--merge-output-format", "mp4",
+            "-P", self.output_dir,
+            "-o", "%(title)s.%(ext)s",
         ]
-        if ff != "ffmpeg":
-            cmd += ["--ffmpeg-location", ff]
-        cmd.append(url)
-        strategies.append(("ffmpeg downloader", cmd))
 
-        # 4: nuclear - hls + ffmpeg + sleep between requests
-        cmd = [yt, "-f", "best[protocol=m3u8]/best"]
-        cmd += self._base_args(url, cookies_browser)
-        cmd += [
-            "--legacy-server-connect",
-            "--downloader", ff,
-            "--sleep-requests", "1",
-            "--extractor-retries", "3",
-        ]
-        if ff != "ffmpeg":
+        if ff and ff != "ffmpeg":
             cmd += ["--ffmpeg-location", ff]
-        cmd.append(url)
-        strategies.append(("hls + ffmpeg + throttle", cmd))
+
+        if cookies_file:
+            cmd += ["--cookies", cookies_file]
+        elif cookies_browser:
+            cmd += ["--cookies-from-browser", cookies_browser]
+
+        cmd += shlex.split(format_str)
+
+        if extra_args:
+            cmd += extra_args
+
+        cmd += ["--", url]
+        return cmd
+
+    def _build_strategies(
+        self,
+        url: str,
+        format_str: str,
+        cookies_file: str | None,
+        cookies_browser: str | None,
+    ) -> list[tuple[str, list[str]]]:
+        """Return ordered list of download strategies to try.
+
+        1. default — yt-dlp own choice (best quality)
+        2. youtube android — no JS runtime / PO token needed
+        3. youtube ios — alternative client
+        4. youtube android, no cookies — last resort
+        """
+        strategies: list[tuple[str, list[str]]] = []
+
+        strategies.append((
+            "default",
+            self._build_cmd(url, format_str, cookies_file, cookies_browser),
+        ))
+
+        if _is_youtube_url(url):
+            strategies.append((
+                "youtube android",
+                self._build_cmd(
+                    url, format_str, cookies_file, cookies_browser,
+                    extra_args=["--extractor-args", "youtube:player_client=android"],
+                ),
+            ))
+
+            strategies.append((
+                "youtube ios",
+                self._build_cmd(
+                    url, format_str, cookies_file, cookies_browser,
+                    extra_args=["--extractor-args", "youtube:player_client=ios"],
+                ),
+            ))
+
+            strategies.append((
+                "youtube android no-cookies",
+                self._build_cmd(
+                    url, format_str, None, None,
+                    extra_args=["--extractor-args", "youtube:player_client=android"],
+                ),
+            ))
 
         return strategies
 
-    def get_video_info(self, url, cookies_browser="firefox"):
-        cmd = [self.ytdlp_path, "--dump-json", "--no-download"]
-        # support list of cookie sources; use the first for info
-        cb = None
-        if isinstance(cookies_browser, (list, tuple)) and cookies_browser:
-            cb = cookies_browser[0]
-        else:
-            cb = cookies_browser
-        cmd += self._base_args(url, cb)
-        cmd += ["--legacy-server-connect"]
-        cmd.append(url)
+    def _run_attempt(
+        self, cmd: list[str], on_progress
+    ) -> tuple[bool, bool, bool, bool]:
+        """Run a single strategy attempt.
 
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=45, **_popen_kwargs())
-            
-            if result.returncode == 0:
-                return json.loads(result.stdout)
-            else:
-                print(f"[ERROR] get_video_info failed. Exit Code: {result.returncode}", file=sys.stderr)
-                print(f"[ERROR DETAILS]: {result.stderr}", file=sys.stderr)
-                
-        except subprocess.TimeoutExpired:
-            print("[ERROR] get_video_info encountered a 45-second timeout.", file=sys.stderr)
-        except json.JSONDecodeError:
-            print("[ERROR] the output of get_video_info is not in a valid JSON format.", file=sys.stderr)
-        except Exception as e:
-            print(f"[ERROR] an unexpected error occurred during get_video_info: {str(e)}", file=sys.stderr)
-            
-        return None
-
-    def _run_attempt(self, cmd, on_progress):
+        Returns:
+            (ok, had_signature_issue, only_images_available, needs_signin)
+        """
         self.process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, **_popen_kwargs()
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            **_popen_kwargs(),
         )
 
-        had_http_error = False
-        had_cookie_error = False
+        had_signature_issue   = False
+        only_images_available = False
+        needs_signin          = False
 
         for line in self.process.stdout:
             if self.cancelled:
                 self.process.kill()
-                return (False, False, False)
+                return (False, had_signature_issue, only_images_available, needs_signin)
 
-            line = line.strip()
+            line = line.rstrip()
             if on_progress:
                 on_progress(line)
 
-            if "HTTP Error 404" in line or "HTTP Error 412" in line:
-                had_http_error = True
-            ll = line.lower()
-            if ("could not copy" in ll and "cookie" in ll) or "failed to decrypt" in ll:
-                had_cookie_error = True
+            lowered = line.lower()
+            if "signature solving failed" in lowered or "n challenge solving failed" in lowered:
+                had_signature_issue = True
+            if "only images are available" in lowered:
+                only_images_available = True
+            if "sign in to confirm" in lowered or "confirm you're not a bot" in lowered:
+                needs_signin = True
 
         self.process.wait()
-        ok = self.process.returncode == 0
-        return (ok, had_http_error, had_cookie_error)
+        return (
+            self.process.returncode == 0,
+            had_signature_issue,
+            only_images_available,
+            needs_signin,
+        )
 
-    def download(self, url, on_progress=None, on_finished=None, on_error=None,
-                 cookies_browser="firefox", format_str="bv*+ba/b"):
+    def _auto_update_ytdlp_windows(self, on_progress=None) -> bool:
+        """Download the latest yt-dlp.exe to the persistent override directory."""
+        if not IS_WIN:
+            return False
+        try:
+            os.makedirs(YTDLP_GUI_BIN_DIR, exist_ok=True)
+            temp_path = YTDLP_OVERRIDE_PATH + ".tmp"
+            if on_progress:
+                on_progress("[info] auto-updating yt-dlp to fix YouTube challenge...")
+            urllib.request.urlretrieve(YTDLP_LATEST_URL, temp_path)
+            if not os.path.isfile(temp_path) or os.path.getsize(temp_path) < 1_000_000:
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+                if on_progress:
+                    on_progress("[warn] yt-dlp update file looks invalid, skipping")
+                return False
+            if os.path.exists(YTDLP_OVERRIDE_PATH):
+                os.remove(YTDLP_OVERRIDE_PATH)
+            os.replace(temp_path, YTDLP_OVERRIDE_PATH)
+            self.ytdlp_path = YTDLP_OVERRIDE_PATH
+            if on_progress:
+                on_progress(f"[info] yt-dlp updated: {self.ytdlp_path}")
+            return True
+        except Exception as e:
+            if on_progress:
+                on_progress(f"[warn] yt-dlp auto-update failed: {e}")
+            return False
+
+    def download(
+        self,
+        url: str,
+        on_progress=None,
+        on_finished=None,
+        on_error=None,
+        cookies_file: str | None = None,
+        cookies_browser: str | None = None,
+        format_str: str = DEFAULT_FORMAT,
+    ):
+        """Start the download in a background thread."""
         self.cancelled = False
 
         def _run():
             try:
-                # allow prioritized cookie sources (list) or single value
-                cookie_choices = cookies_browser if isinstance(cookies_browser, (list, tuple)) else [cookies_browser]
+                had_signature_issue_any = False
+                only_images_any         = False
+                needs_signin_any        = False
+                auto_update_tried       = False
 
-                for choice_idx, choice in enumerate(cookie_choices):
-                    if self.cancelled:
-                        return
+                while True:
+                    strategies = self._build_strategies(
+                        url, format_str, cookies_file, cookies_browser
+                    )
 
-                    if choice is None:
-                        if on_progress:
-                            on_progress(f"[info] trying without cookies...")
-                    else:
-                        if on_progress:
-                            on_progress(f"[info] trying cookies-from-browser: {choice} (option {choice_idx+1}/{len(cookie_choices)})")
-
-                    strategies = self._build_strategies(url, format_str, choice)
+                    had_sig_round      = False
+                    only_img_round     = False
+                    needs_signin_round = False
 
                     for i, (label, cmd) in enumerate(strategies):
                         if self.cancelled:
                             return
 
                         if i > 0 and on_progress:
-                            on_progress(f"[retry {i}/{len(strategies)-1}] trying: {label}...")
+                            on_progress(f"[retry {i}/{len(strategies)-1}] trying {label}...")
 
-                        ok, had_http_error, had_cookie_error = self._run_attempt(cmd, on_progress)
+                        ok, had_sig, only_img, needs_signin = self._run_attempt(
+                            cmd, on_progress
+                        )
+                        had_sig_round      = had_sig_round      or had_sig
+                        only_img_round     = only_img_round     or only_img
+                        needs_signin_round = needs_signin_round or needs_signin
 
                         if ok:
                             if on_finished and not self.cancelled:
@@ -318,42 +335,47 @@ class Downloader:
                         if self.cancelled:
                             return
 
-                        if had_cookie_error:
-                            # browser cookie DB is locked or unreadable; retry same choice without cookies
+                    had_signature_issue_any = had_signature_issue_any or had_sig_round
+                    only_images_any         = only_images_any         or only_img_round
+                    needs_signin_any        = needs_signin_any        or needs_signin_round
+
+                    # auto-update yt-dlp once when a signature challenge is hit;
+                    # skip if sign-in is required since updating won't help
+                    if (
+                        _is_youtube_url(url)
+                        and (had_sig_round or only_img_round)
+                        and not needs_signin_round
+                        and not auto_update_tried
+                    ):
+                        auto_update_tried = True
+                        if self._auto_update_ytdlp_windows(on_progress=on_progress):
                             if on_progress:
-                                on_progress("[warn] browser is locking cookies, retrying without cookies...")
-                                on_progress("[warn] close the browser for cookie access, or this will try without them")
-
-                            # rebuild strategies without cookies and run them
-                            no_cookie_strategies = self._build_strategies(url, format_str, None)
-                            for j, (nc_label, nc_cmd) in enumerate(no_cookie_strategies):
-                                if self.cancelled:
-                                    return
-                                if j > 0 and on_progress:
-                                    on_progress(f"[retry {j}/{len(no_cookie_strategies)-1}] (no cookies) {nc_label}...")
-
-                                nc_ok, _, _ = self._run_attempt(nc_cmd, on_progress)
-                                if nc_ok:
-                                    if on_finished and not self.cancelled:
-                                        on_finished()
-                                    return
-
-                            # this cookie choice failed due to cookie issues; try next cookie source
-                            if not self.cancelled and on_progress:
-                                on_progress(f"[warn] cookie option '{choice}' failed; trying next cookie source if available...")
-                            break
-
-                        if not had_http_error and i == 0:
+                                on_progress("[info] retrying with updated yt-dlp...")
                             continue
 
-                    # continue to next cookie choice if current didn't yield success
+                    break
 
                 if not self.cancelled and on_error:
-                    on_error("all download strategies failed")
+                    if needs_signin_any:
+                        on_error(
+                            "YouTube requires sign-in (bot check / age restriction).\n"
+                            "Fix: log in to YouTube in your browser, export cookies.txt "
+                            "with 'Get cookies.txt LOCALLY', then select it in manual mode."
+                        )
+                    elif had_signature_issue_any or only_images_any:
+                        on_error(
+                            "YouTube download failed.\n"
+                            "Try:\n"
+                            "1) Use cookies: log in to YouTube, export cookies.txt with "
+                            "'Get cookies.txt LOCALLY'.\n"
+                            "2) Install Node.js: nodejs.org"
+                        )
+                    else:
+                        on_error("All download strategies failed.")
 
             except FileNotFoundError:
                 if on_error:
-                    on_error("yt-dlp not found. install it first")
+                    on_error("yt-dlp not found. Please install it first.")
             except Exception as e:
                 if on_error:
                     on_error(str(e))
@@ -363,15 +385,16 @@ class Downloader:
         return thread
 
     def cancel(self):
+        """Cancel the current download."""
         self.cancelled = True
         if self.process:
             try:
                 if IS_WIN:
                     subprocess.run(
                         ["taskkill", "/F", "/T", "/PID", str(self.process.pid)],
-                        stdout=subprocess.DEVNULL, 
+                        stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
-                        creationflags=subprocess.CREATE_NO_WINDOW
+                        creationflags=subprocess.CREATE_NO_WINDOW,
                     )
                 else:
                     os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
@@ -379,8 +402,35 @@ class Downloader:
                 pass
 
     @staticmethod
-    def parse_progress(line):
-        match = re.search(r'(\d+\.?\d*)%', line)
-        if match:
-            return float(match.group(1))
-        return None
+    def parse_progress(line: str) -> dict | None:
+        """Parse a __SEP__-delimited progress line.
+
+        Returns:
+            dict with keys: status, total, percent, speed, eta, title — or None.
+        """
+        if "__SEP__" not in line:
+            return None
+        parts = [p.strip() for p in line.split("__SEP__")]
+        if len(parts) < 6:
+            return None
+        return {
+            "status":  parts[0],
+            "total":   parts[1],
+            "percent": parts[2],
+            "speed":   parts[3],
+            "eta":     parts[4],
+            "title":   parts[5],
+        }
+
+    @staticmethod
+    def parse_percent(line: str) -> float | None:
+        """Extract the percentage value from a progress line."""
+        if "__SEP__" in line:
+            parts = line.split("__SEP__")
+            if len(parts) >= 3:
+                try:
+                    return float(parts[2].strip().replace("%", ""))
+                except ValueError:
+                    pass
+        m = re.search(r"(\d+\.?\d*)%", line)
+        return float(m.group(1)) if m else None
