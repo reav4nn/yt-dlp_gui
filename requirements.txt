@@ -1,2 +1,2 @@
-yt-dlp
-customtkinter
+yt-dlp>=2024.01.01,<2027.0.0
+customtkinter>=5.2.0,<6.0

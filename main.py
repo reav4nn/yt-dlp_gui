@@ -1,13 +1,10 @@
 import customtkinter as ctk
-import tkinter as tk
 from tkinter import filedialog
-import threading
 import os
-import sys
-import shutil
 import re
+import time
 
-from downloader import Downloader, find_ytdlp, find_ffmpeg, IS_WIN, DEFAULT_FORMAT, PRESETS
+from downloader import Downloader, IS_WIN, DEFAULT_FORMAT, PRESETS, binary_available
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -15,12 +12,28 @@ ctk.set_default_color_theme("blue")
 BROWSER_OPTIONS = ["manual", "firefox", "chrome", "edge", "opera", "opera-gx", "none"]
 DEFAULT_BROWSER = "manual"
 
-OPERA_GX_WARNING = (
-    "Opera GX doesn't allow automatic cookie export, so please use the manual "
-    "cookies.txt option instead :)"
-)
+LOG_FLUSH_INTERVAL_MS = 150
+MAX_LOG_LINES = 2000
+PROGRESS_UPDATE_INTERVAL_SECONDS = 0.15
+PROGRESS_MIN_DELTA = 0.5
 
-STARTUP_STATUS = "tip: if you use Opera GX, manual cookies.txt is recommended ❤️"
+APP_BG = "#050505"
+PANEL_BG = "#101010"
+FIELD_BG = "#171717"
+BORDER = "#2A2A2A"
+TEXT = "#F4F4F4"
+MUTED = "#A1A1A1"
+RED = "#C1121F"
+RED_HOVER = "#9B0E19"
+RED_DARK = "#2B0A0D"
+
+STATUS_COLORS = {
+    "ready": (RED_DARK, "#FF9AA2"),
+    "active": ("#2A0D10", "#FF7B85"),
+    "warning": ("#332100", "#FFD27A"),
+    "error": ("#3A0B10", "#FF9AA2"),
+    "success": ("#0E2614", "#8CE6A5"),
+}
 
 
 class App(ctk.CTk):
@@ -30,254 +43,360 @@ class App(ctk.CTk):
         super().__init__()
 
         self.title("YT-DLP GUI")
-        self.geometry("820x600")
-        self.minsize(700, 520)
+        self.geometry("900x720")
+        self.minsize(760, 560)
+        self.configure(fg_color=APP_BG)
 
         self.downloader = Downloader()
         self.downloading = False
         self.deps_ok = False
-        self.cookies_file_path = None  # path to the manually selected cookies.txt
+        self.cookies_file_path = None
+        self._log_buffer = []
+        self._log_flush_scheduled = False
+        self._last_progress_value = None
+        self._last_progress_update_at = 0.0
 
+        self._init_fonts()
         self._build_ui()
         self._check_deps()
 
         if self.deps_ok:
-            self._set_status(STARTUP_STATUS)
+            self._set_status("Paste a link and press Start Download.", tone="ready")
 
-    # ui setup
+    def _init_fonts(self):
+        self.title_font = ctk.CTkFont(family="Segoe UI Semibold", size=24, weight="bold")
+        self.label_font = ctk.CTkFont(family="Segoe UI", size=13)
+        self.value_font = ctk.CTkFont(family="Segoe UI Semibold", size=14, weight="bold")
+        self.log_font = ctk.CTkFont(family="Cascadia Code", size=12)
 
     def _build_ui(self):
         self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(4, weight=1)  # log area expands with the window
+        self.grid_rowconfigure(0, weight=1)
 
-        url_frame = ctk.CTkFrame(self, fg_color="transparent")
-        url_frame.grid(row=0, column=0, padx=16, pady=(16, 8), sticky="ew")
-        url_frame.grid_columnconfigure(1, weight=1)
+        shell = ctk.CTkFrame(
+            self,
+            fg_color=PANEL_BG,
+            border_width=1,
+            border_color=BORDER,
+            corner_radius=18,
+        )
+        shell.grid(row=0, column=0, padx=18, pady=18, sticky="nsew")
+        shell.grid_columnconfigure(0, weight=1)
+        shell.grid_rowconfigure(5, weight=1)
 
-        ctk.CTkLabel(url_frame, text="URL", font=("", 14, "bold")).grid(
-            row=0, column=0, padx=(0, 10), sticky="w"
+        header = ctk.CTkFrame(shell, fg_color="transparent")
+        header.grid(row=0, column=0, padx=18, pady=(18, 10), sticky="ew")
+        header.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            header,
+            text="YT-DLP GUI",
+            font=self.title_font,
+            text_color=TEXT,
+        ).grid(row=0, column=0, sticky="w")
+
+        ctk.CTkLabel(
+            header,
+            text="Simple red and black desktop downloader",
+            font=self.label_font,
+            text_color=MUTED,
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        self.deps_label = ctk.CTkLabel(
+            header,
+            text="Checking tools",
+            font=self.label_font,
+            text_color="#FF9AA2",
+            fg_color=RED_DARK,
+            corner_radius=999,
+            padx=12,
+            pady=6,
+        )
+        self.deps_label.grid(row=0, column=1, rowspan=2, sticky="e")
+
+        form = ctk.CTkFrame(shell, fg_color="transparent")
+        form.grid(row=1, column=0, padx=18, pady=(0, 10), sticky="ew")
+        form.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(form, text="URL", font=self.label_font, text_color=MUTED).grid(
+            row=0, column=0, sticky="w"
         )
         self.url_entry = ctk.CTkEntry(
-            url_frame, placeholder_text="Paste a video link here...", height=36
+            form,
+            placeholder_text="https://www.youtube.com/watch?v=...",
+            height=42,
+            fg_color=FIELD_BG,
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+            placeholder_text_color=MUTED,
         )
-        self.url_entry.grid(row=0, column=1, sticky="ew")
+        self.url_entry.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         self.url_entry.bind("<Return>", lambda _: self._start_download())
 
-        settings_frame = ctk.CTkFrame(self, fg_color="transparent")
-        settings_frame.grid(row=1, column=0, padx=16, pady=(0, 8), sticky="ew")
+        options = ctk.CTkFrame(shell, fg_color="transparent")
+        options.grid(row=2, column=0, padx=18, pady=(0, 10), sticky="ew")
+        options.grid_columnconfigure(3, weight=1)
 
-        ctk.CTkLabel(settings_frame, text="cookies").pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(options, text="Cookies", font=self.label_font, text_color=MUTED).grid(
+            row=0, column=0, sticky="w"
+        )
         self.browser_var = ctk.StringVar(value=DEFAULT_BROWSER)
         self.browser_menu = ctk.CTkOptionMenu(
-            settings_frame,
+            options,
             variable=self.browser_var,
             values=BROWSER_OPTIONS,
-            width=140,
+            width=150,
+            height=38,
+            fg_color=RED,
+            button_color=RED,
+            button_hover_color=RED_HOVER,
+            dropdown_fg_color=FIELD_BG,
+            dropdown_hover_color=RED_DARK,
             command=self._on_browser_changed,
         )
-        self.browser_menu.pack(side="left", padx=(0, 8))
+        self.browser_menu.grid(row=1, column=0, sticky="w", pady=(6, 0))
 
         self.cookies_btn = ctk.CTkButton(
-            settings_frame,
-            text="Select cookies.txt",
+            options,
+            text="Choose cookies.txt",
             width=150,
+            height=38,
+            fg_color=FIELD_BG,
+            hover_color=RED_DARK,
+            border_width=1,
+            border_color=BORDER,
             command=self._pick_cookies_file,
         )
-        self.cookies_btn.pack(side="left", padx=(0, 8))
+        self.cookies_btn.grid(row=1, column=1, padx=(10, 0), sticky="w", pady=(6, 0))
 
-        self.cookies_file_label = ctk.CTkLabel(
-            settings_frame, text="(no file selected)", text_color="gray"
+        ctk.CTkLabel(options, text="Format", font=self.label_font, text_color=MUTED).grid(
+            row=0, column=2, sticky="w", padx=(18, 0)
         )
-        self.cookies_file_label.pack(side="left", padx=(0, 16))
-
-        # Format
-        ctk.CTkLabel(settings_frame, text="format").pack(side="left", padx=(0, 6))
         self.format_var = ctk.StringVar(value="best")
         self.format_menu = ctk.CTkOptionMenu(
-            settings_frame,
+            options,
             variable=self.format_var,
             values=list(PRESETS.keys()),
-            width=100,
+            width=110,
+            height=38,
+            fg_color=RED,
+            button_color=RED,
+            button_hover_color=RED_HOVER,
+            dropdown_fg_color=FIELD_BG,
+            dropdown_hover_color=RED_DARK,
         )
-        self.format_menu.pack(side="left", padx=(0, 16))
+        self.format_menu.grid(row=1, column=2, sticky="w", padx=(18, 0), pady=(6, 0))
 
-        dir_frame = ctk.CTkFrame(self, fg_color="transparent")
-        dir_frame.grid(row=2, column=0, padx=16, pady=(0, 8), sticky="ew")
-
-        ctk.CTkLabel(dir_frame, text="save to").pack(side="left", padx=(0, 6))
         self.dir_var = ctk.StringVar(value=self.downloader.output_dir)
-        self.dir_entry = ctk.CTkEntry(dir_frame, textvariable=self.dir_var, width=350)
-        self.dir_entry.pack(side="left", padx=(0, 4))
-        self.dir_btn = ctk.CTkButton(dir_frame, text="...", width=32, command=self._pick_dir)
-        self.dir_btn.pack(side="left")
-
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.grid(row=3, column=0, padx=16, pady=(0, 4), sticky="ew")
-
-        self.dl_button = ctk.CTkButton(
-            btn_frame, text="Download", height=38,
-            font=("", 14, "bold"), command=self._start_download,
+        self.dir_entry = ctk.CTkEntry(
+            options,
+            textvariable=self.dir_var,
+            height=38,
+            fg_color=FIELD_BG,
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
         )
-        self.dl_button.pack(side="left", padx=(0, 8))
+        self.dir_entry.grid(row=1, column=3, sticky="ew", padx=(18, 8), pady=(6, 0))
 
-        self.cancel_button = ctk.CTkButton(
-            btn_frame, text="Cancel", height=38,
-            fg_color="#8B0000", hover_color="#A52A2A",
-            command=self._cancel_download, state="disabled",
+        self.dir_btn = ctk.CTkButton(
+            options,
+            text="Browse",
+            width=88,
+            height=38,
+            fg_color=FIELD_BG,
+            hover_color=RED_DARK,
+            border_width=1,
+            border_color=BORDER,
+            command=self._pick_dir,
         )
-        self.cancel_button.pack(side="left", padx=(0, 16))
+        self.dir_btn.grid(row=1, column=4, sticky="e", pady=(6, 0))
 
-        self.progress_bar = ctk.CTkProgressBar(btn_frame, height=14)
-        self.progress_bar.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        self.progress_bar.set(0)
-
-        self.pct_label = ctk.CTkLabel(btn_frame, text="0%", width=50)
-        self.pct_label.pack(side="left")
-
-        self.log_box = ctk.CTkTextbox(self, font=("Consolas", 12), state="disabled")
-        self.log_box.grid(row=4, column=0, padx=16, pady=(0, 4), sticky="nsew")
-
-        self.warning_label = ctk.CTkLabel(
-            self,
-            text=OPERA_GX_WARNING,
-            font=("", 11, "italic"),
-            text_color="#00CED1",
-            wraplength=750,
+        self.cookies_file_label = ctk.CTkLabel(
+            shell,
+            text="Manual cookies not selected",
+            font=self.label_font,
+            text_color=MUTED,
             anchor="w",
         )
-        self.warning_label.grid(row=5, column=0, padx=16, pady=(2, 2), sticky="ew")
+        self.cookies_file_label.grid(row=3, column=0, padx=18, pady=(0, 10), sticky="ew")
 
-        self.status_label = ctk.CTkLabel(self, text="ready", font=("", 11), anchor="w")
-        self.status_label.grid(row=6, column=0, padx=16, pady=(0, 10), sticky="ew")
+        actions = ctk.CTkFrame(shell, fg_color="transparent")
+        actions.grid(row=4, column=0, padx=18, pady=(0, 10), sticky="ew")
+        actions.grid_columnconfigure(2, weight=1)
+
+        self.dl_button = ctk.CTkButton(
+            actions,
+            text="Start Download",
+            height=40,
+            fg_color=RED,
+            hover_color=RED_HOVER,
+            font=self.value_font,
+            command=self._start_download,
+        )
+        self.dl_button.grid(row=0, column=0, sticky="w")
+
+        self.cancel_button = ctk.CTkButton(
+            actions,
+            text="Cancel",
+            height=40,
+            fg_color=FIELD_BG,
+            hover_color=RED_DARK,
+            border_width=1,
+            border_color=BORDER,
+            font=self.value_font,
+            command=self._cancel_download,
+            state="disabled",
+        )
+        self.cancel_button.grid(row=0, column=1, padx=(10, 0), sticky="w")
+
+        self.pct_label = ctk.CTkLabel(
+            actions,
+            text="0%",
+            font=ctk.CTkFont(family="Segoe UI Semibold", size=22, weight="bold"),
+            text_color=TEXT,
+        )
+        self.pct_label.grid(row=0, column=3, sticky="e")
+
+        self.progress_bar = ctk.CTkProgressBar(
+            shell,
+            height=14,
+            fg_color=FIELD_BG,
+            progress_color=RED,
+        )
+        self.progress_bar.grid(row=5, column=0, padx=18, pady=(0, 10), sticky="ew")
+        self.progress_bar.set(0)
+
+        self.status_label = ctk.CTkLabel(
+            shell,
+            text="Ready",
+            font=self.label_font,
+            text_color="#FF9AA2",
+            fg_color=RED_DARK,
+            corner_radius=10,
+            anchor="w",
+            padx=12,
+            pady=10,
+        )
+        self.status_label.grid(row=6, column=0, padx=18, pady=(0, 10), sticky="ew")
+
+        self.log_box = ctk.CTkTextbox(
+            shell,
+            font=self.log_font,
+            state="disabled",
+            fg_color="#0C0C0C",
+            border_width=1,
+            border_color=BORDER,
+            text_color=TEXT,
+            corner_radius=12,
+            wrap="word",
+        )
+        self.log_box.grid(row=7, column=0, padx=18, pady=(0, 18), sticky="nsew")
+        shell.grid_rowconfigure(7, weight=1)
 
         self._on_browser_changed(DEFAULT_BROWSER)
 
-    # event handlers
+    def _set_status(self, text: str, tone: str = "ready"):
+        fg_color, text_color = STATUS_COLORS.get(tone, STATUS_COLORS["ready"])
+        self.status_label.configure(text=text, fg_color=fg_color, text_color=text_color)
+
+    def _set_dependency_state(self, text: str, ok: bool):
+        self.deps_label.configure(
+            text=text,
+            fg_color="#102112" if ok else RED_DARK,
+            text_color="#8CE6A5" if ok else "#FF9AA2",
+        )
 
     def _on_browser_changed(self, choice: str):
-        """Enable or disable the manual file button depending on the selected cookie mode."""
         if choice == "manual":
             self.cookies_btn.configure(state="normal")
-            self.cookies_file_label.configure(
-                text=(
-                    os.path.basename(self.cookies_file_path)
-                    if self.cookies_file_path
-                    else "(no file selected)"
-                ),
-                text_color="gray" if not self.cookies_file_path else "#00FF7F",
-            )
+            label_text = os.path.basename(self.cookies_file_path) if self.cookies_file_path else "Manual cookies not selected"
+            label_color = TEXT if self.cookies_file_path else MUTED
+        elif choice == "none":
+            self.cookies_btn.configure(state="disabled")
+            label_text = "Cookies disabled"
+            label_color = MUTED
         else:
             self.cookies_btn.configure(state="disabled")
-            if choice == "opera-gx":
-                self.cookies_file_label.configure(
-                    text="opera gx (auto)", text_color="#FFD700"
-                )
-            else:
-                self.cookies_file_label.configure(text="", text_color="gray")
+            label_text = f"Using {choice.replace('-', ' ').title()} browser session"
+            label_color = "#FF9AA2"
+
+        self.cookies_file_label.configure(text=label_text, text_color=label_color)
 
     def _pick_cookies_file(self):
-        """Open a file dialog to pick a cookies.txt exported by 'Get cookies.txt LOCALLY'."""
         path = filedialog.askopenfilename(
             title="Select cookies.txt",
             filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
         )
         if path:
             self.cookies_file_path = path
-            self.cookies_file_label.configure(
-                text=os.path.basename(path), text_color="#00FF7F"
-            )
+            self._on_browser_changed(self.browser_var.get())
             self._log(f"[info] cookies.txt selected: {path}")
 
     def _pick_dir(self):
-        """Open a dialog to choose the output folder."""
-        d = filedialog.askdirectory(initialdir=self.dir_var.get())
-        if d:
-            self.dir_var.set(d)
-
-    # dependency check 
+        selected_dir = filedialog.askdirectory(initialdir=self.dir_var.get())
+        if selected_dir:
+            self.dir_var.set(selected_dir)
 
     def _check_deps(self):
-        """Check that yt-dlp and ffmpeg are available, and update the UI accordingly."""
-        yt = self.downloader.ytdlp_path
-        ff = self.downloader.ffmpeg_path
+        yt_ok = binary_available(self.downloader.ytdlp_path)
+        ff_ok = binary_available(self.downloader.ffmpeg_path)
 
-        yt_ok = shutil.which(yt) is not None or os.path.isfile(yt)
-        ff_ok = shutil.which(ff) is not None or os.path.isfile(ff)
-
-        msgs = []
+        missing = []
         if not yt_ok:
-            msgs.append("yt-dlp not found")
+            missing.append("yt-dlp")
         if not ff_ok:
-            msgs.append("ffmpeg not found")
+            missing.append("ffmpeg")
 
-        if msgs:
+        if missing:
             self.deps_ok = False
             self.dl_button.configure(state="disabled")
-            warn = ", ".join(msgs)
+            self._set_dependency_state("Missing tools", ok=False)
+            warn = ", ".join(missing) + " not found"
             if IS_WIN:
-                warn += " — add to PATH or place the .exe next to this program"
-            self._set_status(warn)
+                warn += ". Add them to PATH or place the executables next to the app."
+            self._set_status(warn, tone="warning")
             self._log(f"[warn] {warn}")
         else:
             self.deps_ok = True
             self.dl_button.configure(state="normal")
-            self._set_status(STARTUP_STATUS)
-
-    # cookie logic
+            self._set_dependency_state("Tools ready", ok=True)
+            self._set_status("Paste a link and press Start Download.", tone="ready")
 
     def _resolve_cookie_args(self):
-        """Return (cookies_file, cookies_browser) based on the current cookie mode.
+        selection = self.browser_var.get()
 
-        cookies_file    — path for --cookies (manual mode)
-        cookies_browser — string for --cookies-from-browser
-        """
-        sel = self.browser_var.get()
-
-        # manual mode: pass the file directly to --cookies
-        if sel == "manual":
+        if selection == "manual":
             if self.cookies_file_path and os.path.isfile(self.cookies_file_path):
                 return (self.cookies_file_path, None)
-            else:
-                self._log(
-                    "[warn] no cookies.txt selected or file not found, continuing without cookies"
-                )
-                return (None, None)
-
-        # opera gx needs a special profile path argument
-        if sel == "opera-gx":
-            roaming = os.environ.get("APPDATA", "")
-            opera_gx_path = os.path.join(roaming, "Opera Software", "Opera GX Stable")
-            if os.path.isdir(opera_gx_path):
-                # yt-dlp format: --cookies-from-browser opera:"path"
-                browser_arg = f'opera:"{opera_gx_path}"'
-                self._log(f"[info] opera gx profile found: {opera_gx_path}")
-                return (None, browser_arg)
-            else:
-                self._log(f"[warn] opera gx profile not found: {opera_gx_path}")
-                self._log("[warn] please use manual cookies.txt instead")
-                return (None, None)
-
-        # no cookies
-        if sel == "none":
+            self._log("[warn] no cookies.txt selected or file not found, continuing without cookies")
             return (None, None)
 
-        # standard browsers — firefox, chrome, edge, opera
-        return (None, sel)
+        if selection == "opera-gx":
+            roaming = os.environ.get("APPDATA", "")
+            profile_path = os.path.join(roaming, "Opera Software", "Opera GX Stable")
+            if os.path.isdir(profile_path):
+                return (None, f'opera:"{profile_path}"')
+            self._log("[info] selected browser profile was not found, continuing without cookies")
+            return (None, None)
 
-    # download control
+        if selection == "none":
+            return (None, None)
+
+        return (None, selection)
 
     def _start_download(self):
-        """Validate the URL and kick off the download."""
         if not self.deps_ok:
             return
 
         url = self.url_entry.get().strip()
         if not url:
-            self._set_status("please enter a URL first")
+            self._set_status("Enter a URL before starting the download.", tone="warning")
             return
 
         if not re.match(r"^https?://[^\s]+", url):
-            self._set_status("please enter a valid http/https URL")
+            self._set_status("The URL must start with http:// or https://.", tone="warning")
             return
 
         if self.downloading:
@@ -290,17 +409,20 @@ class App(ctk.CTk):
 
         self.progress_bar.set(0)
         self.pct_label.configure(text="0%")
+        self._last_progress_value = None
+        self._last_progress_update_at = 0.0
+        self._log_buffer.clear()
+        self._log_flush_scheduled = False
 
         self.log_box.configure(state="normal")
         self.log_box.delete("1.0", "end")
         self.log_box.configure(state="disabled")
 
         self.downloader.output_dir = self.dir_var.get()
-
         cookies_file, cookies_browser = self._resolve_cookie_args()
-        self._set_status("downloading...")
-
         format_str = PRESETS.get(self.format_var.get(), DEFAULT_FORMAT)
+
+        self._set_status("Download started.", tone="active")
 
         self.downloader.download(
             url,
@@ -312,77 +434,95 @@ class App(ctk.CTk):
             format_str=format_str,
         )
 
-    # callbacks
-
     def _on_progress(self, line: str):
-        """Called for each output line from yt-dlp."""
-        prog = Downloader.parse_progress(line)
-        if prog:
+        progress = Downloader.parse_progress(line)
+        percent = None
+
+        if progress:
             display = (
-                f"[{prog['status']}] {prog['title']}  "
-                f"{prog['percent']}  {prog['speed']}  ETA {prog['eta']}  ({prog['total']})"
+                f"[{progress['status']}] {progress['title']}  "
+                f"{progress['percent']}  {progress['speed']}  ETA {progress['eta']}  ({progress['total']})"
             )
             self._log(display)
+            percent = progress["percent_value"]
         else:
             self._log(line)
+            percent = Downloader.parse_percent(line)
 
-        pct = Downloader.parse_percent(line)
-        if pct is not None:
-            self.progress_bar.set(pct / 100.0)
-            self.pct_label.configure(text=f"{pct:.1f}%")
-            self._set_status(f"downloading... {pct:.1f}%")
+        if percent is not None and self._should_update_progress(percent):
+            self.progress_bar.set(percent / 100.0)
+            self.pct_label.configure(text=f"{percent:.1f}%")
+            self._set_status(f"Downloading... {percent:.1f}%", tone="active")
+            self._last_progress_value = percent
+            self._last_progress_update_at = time.monotonic()
 
     def _on_finished(self):
-        """Called when the download completes successfully."""
         self.downloading = False
         self.dl_button.configure(state="normal")
         self.cancel_button.configure(state="disabled")
         self._toggle_inputs("normal")
         self.progress_bar.set(1.0)
         self.pct_label.configure(text="100%")
-        self._set_status("done ✔")
-        self._log("── finished ──")
+        self._set_status("Download finished successfully.", tone="success")
+        self._log("-- finished --")
 
     def _on_error(self, err: str):
-        """Called when the download fails."""
         self.downloading = False
         self.dl_button.configure(state="normal")
         self.cancel_button.configure(state="disabled")
         self._toggle_inputs("normal")
-        self._set_status(f"error: {err}")
+        self._set_status(err, tone="error")
         self._log(f"[error] {err}")
 
     def _cancel_download(self):
-        """Cancel the running download."""
         self.downloader.cancel()
         self.downloading = False
         self.dl_button.configure(state="normal")
         self.cancel_button.configure(state="disabled")
         self._toggle_inputs("normal")
-        self._set_status("cancelled")
-        self._log("── cancelled ──")
+        self._set_status("Download cancelled.", tone="warning")
+        self._log("-- cancelled --")
 
-    # helpers
+    def _should_update_progress(self, pct: float) -> bool:
+        if self._last_progress_value is None:
+            return True
+
+        now = time.monotonic()
+        if pct >= 100:
+            return True
+        if abs(pct - self._last_progress_value) >= PROGRESS_MIN_DELTA:
+            return True
+        return (now - self._last_progress_update_at) >= PROGRESS_UPDATE_INTERVAL_SECONDS
 
     def _log(self, text: str):
-        """Append a line to the log box."""
+        self._log_buffer.append(text)
+        if not self._log_flush_scheduled:
+            self._log_flush_scheduled = True
+            self.after(LOG_FLUSH_INTERVAL_MS, self._flush_log)
+
+    def _flush_log(self):
+        self._log_flush_scheduled = False
+        if not self._log_buffer:
+            return
+
         self.log_box.configure(state="normal")
-        self.log_box.insert("end", text + "\n")
+        self.log_box.insert("end", "\n".join(self._log_buffer) + "\n")
+        self._log_buffer.clear()
+
+        line_count = int(self.log_box.index("end-1c").split(".")[0])
+        if line_count > MAX_LOG_LINES:
+            trim_until = line_count - MAX_LOG_LINES
+            self.log_box.delete("1.0", f"{trim_until + 1}.0")
+
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
 
-    def _set_status(self, text: str):
-        """Update the status bar text."""
-        self.status_label.configure(text=text)
-
     def _toggle_inputs(self, state: str):
-        """Enable or disable all input widgets ('normal' or 'disabled')."""
         self.url_entry.configure(state=state)
         self.browser_menu.configure(state=state)
         self.format_menu.configure(state=state)
         self.dir_entry.configure(state=state)
         self.dir_btn.configure(state=state)
-        # the manual cookies button is only active in manual mode
         if state == "normal" and self.browser_var.get() == "manual":
             self.cookies_btn.configure(state="normal")
         else:

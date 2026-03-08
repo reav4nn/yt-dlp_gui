@@ -6,6 +6,7 @@ import sys
 import shutil
 import signal
 import shlex
+import hashlib
 import urllib.request
 from urllib.parse import urlparse
 
@@ -15,6 +16,9 @@ YOUTUBE_HOST_HINTS  = ("youtube.com", "youtu.be", "music.youtube.com")
 YTDLP_GUI_BIN_DIR   = os.path.join(os.path.expanduser("~"), ".yt-dlp-gui", "bin")
 YTDLP_OVERRIDE_PATH = os.path.join(YTDLP_GUI_BIN_DIR, "yt-dlp.exe")
 YTDLP_LATEST_URL    = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe"
+YTDLP_SHA256_URL    = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS"
+DOWNLOAD_TIMEOUT_SECONDS = 120
+DOWNLOAD_CHUNK_SIZE = 64 * 1024
 
 PROGRESS_TEMPLATE = (
     "%(progress.status)s__SEP__"
@@ -42,15 +46,10 @@ def get_base_path() -> str:
     return os.path.abspath(os.path.dirname(__file__))
 
 
-def find_ytdlp() -> str:
-    """Locate the yt-dlp binary. Priority: user override -> bundled -> PATH -> common paths."""
-    binary = "yt-dlp.exe" if IS_WIN else "yt-dlp"
-    base   = get_base_path()
-
-    if IS_WIN and os.path.isfile(YTDLP_OVERRIDE_PATH):
-        return YTDLP_OVERRIDE_PATH
-
-    bundled = os.path.join(base, binary)
+def _find_binary(name: str, extra_paths: list[str] | None = None) -> str:
+    """Locate a binary from the bundle, PATH, then optional OS-specific paths."""
+    binary = f"{name}.exe" if IS_WIN else name
+    bundled = os.path.join(get_base_path(), binary)
     if os.path.isfile(bundled):
         return bundled
 
@@ -58,36 +57,45 @@ def find_ytdlp() -> str:
     if found:
         return found
 
-    if IS_WIN:
-        for p in [
-            os.path.join(os.environ.get("LOCALAPPDATA", ""), "yt-dlp", "yt-dlp.exe"),
-            os.path.join(os.environ.get("USERPROFILE",  ""), "Downloads", "yt-dlp.exe"),
-            os.path.join(os.environ.get("PROGRAMFILES", ""), "yt-dlp", "yt-dlp.exe"),
-        ]:
-            if p and os.path.isfile(p):
-                return p
+    if IS_WIN and extra_paths:
+        for path in extra_paths:
+            if path and os.path.isfile(path):
+                return path
 
     return binary
+
+
+def binary_available(path: str | None) -> bool:
+    """Return True when a binary path or command name resolves on this machine."""
+    if not path:
+        return False
+    return os.path.isfile(path) or shutil.which(path) is not None
+
+
+def find_ytdlp() -> str:
+    """Locate the yt-dlp binary. Priority: user override -> bundled -> PATH -> common paths."""
+    if IS_WIN and os.path.isfile(YTDLP_OVERRIDE_PATH):
+        return YTDLP_OVERRIDE_PATH
+
+    return _find_binary(
+        "yt-dlp",
+        extra_paths=[
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "yt-dlp", "yt-dlp.exe"),
+            os.path.join(os.environ.get("USERPROFILE", ""), "Downloads", "yt-dlp.exe"),
+            os.path.join(os.environ.get("PROGRAMFILES", ""), "yt-dlp", "yt-dlp.exe"),
+        ],
+    )
 
 
 def find_ffmpeg() -> str:
     """Locate the ffmpeg binary."""
-    binary  = "ffmpeg.exe" if IS_WIN else "ffmpeg"
-    base    = get_base_path()
-    bundled = os.path.join(base, binary)
-    if os.path.isfile(bundled):
-        return bundled
-    found = shutil.which(binary)
-    if found:
-        return found
-    if IS_WIN:
-        for p in [
+    return _find_binary(
+        "ffmpeg",
+        extra_paths=[
             os.path.join(os.environ.get("LOCALAPPDATA", ""), "ffmpeg", "bin", "ffmpeg.exe"),
             os.path.join(os.environ.get("PROGRAMFILES", ""), "ffmpeg", "bin", "ffmpeg.exe"),
-        ]:
-            if p and os.path.isfile(p):
-                return p
-    return binary
+        ],
+    )
 
 
 def _popen_kwargs() -> dict:
@@ -120,14 +128,23 @@ class Downloader:
         self.cancelled   = False
         self.ytdlp_path  = find_ytdlp()
         self.ffmpeg_path = find_ffmpeg()
+        self._proc_lock  = threading.Lock()
+
+    @staticmethod
+    def _insert_extra_args(cmd: list[str], extra_args: list[str] | None) -> list[str]:
+        """Insert strategy-specific args before the `-- url` terminator."""
+        if not extra_args:
+            return list(cmd)
+
+        sentinel_index = cmd.index("--")
+        return cmd[:sentinel_index] + extra_args + cmd[sentinel_index:]
 
     def _build_cmd(
         self,
         url: str,
-        format_str: str,
+        format_args: list[str],
         cookies_file: str | None,
         cookies_browser: str | None,
-        extra_args: list[str] | None = None,
     ) -> list[str]:
         """Build a minimal yt-dlp command — no custom headers or user-agents."""
         yt = self.ytdlp_path
@@ -152,10 +169,7 @@ class Downloader:
         elif cookies_browser:
             cmd += ["--cookies-from-browser", cookies_browser]
 
-        cmd += shlex.split(format_str)
-
-        if extra_args:
-            cmd += extra_args
+        cmd += format_args
 
         cmd += ["--", url]
         return cmd
@@ -163,9 +177,10 @@ class Downloader:
     def _build_strategies(
         self,
         url: str,
-        format_str: str,
+        format_args: list[str],
         cookies_file: str | None,
         cookies_browser: str | None,
+        is_youtube: bool,
     ) -> list[tuple[str, list[str]]]:
         """Return ordered list of download strategies to try.
 
@@ -174,35 +189,32 @@ class Downloader:
         3. youtube ios — alternative client
         4. youtube android, no cookies — last resort
         """
-        strategies: list[tuple[str, list[str]]] = []
+        base_cmd = self._build_cmd(url, format_args, cookies_file, cookies_browser)
+        strategies: list[tuple[str, list[str]]] = [("default", base_cmd)]
 
-        strategies.append((
-            "default",
-            self._build_cmd(url, format_str, cookies_file, cookies_browser),
-        ))
-
-        if _is_youtube_url(url):
+        if is_youtube:
             strategies.append((
                 "youtube android",
-                self._build_cmd(
-                    url, format_str, cookies_file, cookies_browser,
-                    extra_args=["--extractor-args", "youtube:player_client=android"],
+                self._insert_extra_args(
+                    base_cmd,
+                    ["--extractor-args", "youtube:player_client=android"],
                 ),
             ))
 
             strategies.append((
                 "youtube ios",
-                self._build_cmd(
-                    url, format_str, cookies_file, cookies_browser,
-                    extra_args=["--extractor-args", "youtube:player_client=ios"],
+                self._insert_extra_args(
+                    base_cmd,
+                    ["--extractor-args", "youtube:player_client=ios"],
                 ),
             ))
 
+            no_cookie_cmd = self._build_cmd(url, format_args, None, None)
             strategies.append((
                 "youtube android no-cookies",
-                self._build_cmd(
-                    url, format_str, None, None,
-                    extra_args=["--extractor-args", "youtube:player_client=android"],
+                self._insert_extra_args(
+                    no_cookie_cmd,
+                    ["--extractor-args", "youtube:player_client=android"],
                 ),
             ))
 
@@ -216,22 +228,25 @@ class Downloader:
         Returns:
             (ok, had_signature_issue, only_images_available, needs_signin)
         """
-        self.process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            **_popen_kwargs(),
-        )
+        with self._proc_lock:
+            self.process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                **_popen_kwargs(),
+            )
+
+        process = self.process
 
         had_signature_issue   = False
         only_images_available = False
         needs_signin          = False
 
-        for line in self.process.stdout:
+        for line in process.stdout:
             if self.cancelled:
-                self.process.kill()
+                process.kill()
                 return (False, had_signature_issue, only_images_available, needs_signin)
 
             line = line.rstrip()
@@ -246,32 +261,81 @@ class Downloader:
             if "sign in to confirm" in lowered or "confirm you're not a bot" in lowered:
                 needs_signin = True
 
-        self.process.wait()
-        return (
-            self.process.returncode == 0,
-            had_signature_issue,
-            only_images_available,
-            needs_signin,
-        )
+        try:
+            process.wait()
+            return (
+                process.returncode == 0,
+                had_signature_issue,
+                only_images_available,
+                needs_signin,
+            )
+        finally:
+            with self._proc_lock:
+                if self.process is process:
+                    self.process = None
+
+    @staticmethod
+    def _calculate_sha256(file_path: str) -> str:
+        digest = hashlib.sha256()
+        with open(file_path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(DOWNLOAD_CHUNK_SIZE), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _fetch_expected_sha256(self) -> str | None:
+        """Fetch the expected SHA256 for yt-dlp.exe. Returns None on failure."""
+        try:
+            with urllib.request.urlopen(
+                YTDLP_SHA256_URL,
+                timeout=DOWNLOAD_TIMEOUT_SECONDS,
+            ) as response:
+                body = response.read().decode("utf-8", errors="replace")
+        except Exception:
+            return None
+
+        for line in body.splitlines():
+            parts = line.split()
+            if len(parts) >= 2 and parts[-1].endswith("yt-dlp.exe"):
+                return parts[0].lower()
+        return None
+
+    def _download_file(self, url: str, destination: str) -> None:
+        """Download a file with a timeout and cancellation checks."""
+        with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT_SECONDS) as response:
+            with open(destination, "wb") as handle:
+                while True:
+                    if self.cancelled:
+                        raise RuntimeError("cancelled")
+                    chunk = response.read(DOWNLOAD_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
 
     def _auto_update_ytdlp_windows(self, on_progress=None) -> bool:
         """Download the latest yt-dlp.exe to the persistent override directory."""
         if not IS_WIN:
             return False
+        temp_path = YTDLP_OVERRIDE_PATH + ".tmp"
         try:
             os.makedirs(YTDLP_GUI_BIN_DIR, exist_ok=True)
-            temp_path = YTDLP_OVERRIDE_PATH + ".tmp"
             if on_progress:
                 on_progress("[info] auto-updating yt-dlp to fix YouTube challenge...")
-            urllib.request.urlretrieve(YTDLP_LATEST_URL, temp_path)
+
+            expected_sha256 = self._fetch_expected_sha256()
+            self._download_file(YTDLP_LATEST_URL, temp_path)
+
             if not os.path.isfile(temp_path) or os.path.getsize(temp_path) < 1_000_000:
-                try:
-                    os.remove(temp_path)
-                except Exception:
-                    pass
                 if on_progress:
                     on_progress("[warn] yt-dlp update file looks invalid, skipping")
                 return False
+
+            if expected_sha256:
+                actual_sha256 = self._calculate_sha256(temp_path)
+                if actual_sha256.lower() != expected_sha256:
+                    if on_progress:
+                        on_progress("[warn] yt-dlp checksum verification failed, skipping")
+                    return False
+
             if os.path.exists(YTDLP_OVERRIDE_PATH):
                 os.remove(YTDLP_OVERRIDE_PATH)
             os.replace(temp_path, YTDLP_OVERRIDE_PATH)
@@ -280,9 +344,15 @@ class Downloader:
                 on_progress(f"[info] yt-dlp updated: {self.ytdlp_path}")
             return True
         except Exception as e:
-            if on_progress:
+            if on_progress and str(e) != "cancelled":
                 on_progress(f"[warn] yt-dlp auto-update failed: {e}")
             return False
+        finally:
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
     def download(
         self,
@@ -303,10 +373,12 @@ class Downloader:
                 only_images_any         = False
                 needs_signin_any        = False
                 auto_update_tried       = False
+                is_youtube              = _is_youtube_url(url)
+                format_args             = shlex.split(format_str)
 
                 while True:
                     strategies = self._build_strategies(
-                        url, format_str, cookies_file, cookies_browser
+                        url, format_args, cookies_file, cookies_browser, is_youtube
                     )
 
                     had_sig_round      = False
@@ -342,7 +414,7 @@ class Downloader:
                     # auto-update yt-dlp once when a signature challenge is hit;
                     # skip if sign-in is required since updating won't help
                     if (
-                        _is_youtube_url(url)
+                        is_youtube
                         and (had_sig_round or only_img_round)
                         and not needs_signin_round
                         and not auto_update_tried
@@ -387,17 +459,20 @@ class Downloader:
     def cancel(self):
         """Cancel the current download."""
         self.cancelled = True
-        if self.process:
+        with self._proc_lock:
+            process = self.process
+
+        if process:
             try:
                 if IS_WIN:
                     subprocess.run(
-                        ["taskkill", "/F", "/T", "/PID", str(self.process.pid)],
+                        ["taskkill", "/F", "/T", "/PID", str(process.pid)],
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                         creationflags=subprocess.CREATE_NO_WINDOW,
                     )
                 else:
-                    os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
             except Exception:
                 pass
 
@@ -406,17 +481,24 @@ class Downloader:
         """Parse a __SEP__-delimited progress line.
 
         Returns:
-            dict with keys: status, total, percent, speed, eta, title — or None.
+            dict with keys: status, total, percent, percent_value, speed, eta, title — or None.
         """
         if "__SEP__" not in line:
             return None
         parts = [p.strip() for p in line.split("__SEP__")]
         if len(parts) < 6:
             return None
+
+        try:
+            percent_value = float(parts[2].replace("%", ""))
+        except ValueError:
+            percent_value = None
+
         return {
             "status":  parts[0],
             "total":   parts[1],
             "percent": parts[2],
+            "percent_value": percent_value,
             "speed":   parts[3],
             "eta":     parts[4],
             "title":   parts[5],
